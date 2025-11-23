@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grok_client"
+version = "0.1.0"
+description = "Simon’s high-performance async Grok API client with PostgreSQL/json logging"
+authors = [{name = "Simon Watson"}]
+dependencies = [
+    "aiohttp",
+    "asyncpg",
+]
+
+[project.optional-dependencies]
+dev = ["black", "ruff"]

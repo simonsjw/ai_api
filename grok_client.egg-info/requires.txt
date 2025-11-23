@@ -1,0 +1,6 @@
+aiohttp
+asyncpg
+
+[dev]
+black
+ruff
