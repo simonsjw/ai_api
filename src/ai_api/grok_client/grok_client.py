@@ -123,7 +123,7 @@ from infopypg import (
     ResolvedSettingsDict,
     execute_query,
 )
-from logger import setup_logger
+from logger import Logger, setup_logger
 
 from ai_api.data_structures import (
     GrokRequest,
@@ -134,7 +134,9 @@ from ai_api.data_structures import (
 
 err_string: str
 
-logger = setup_logger(logger_name="XAI", log_location=responses_default_settings)
+logger: Logger = setup_logger(
+    logger_name="XAI", log_location=responses_default_settings
+)
 logger.info("Initialising XAIAsyncClient with infopypg integration.")
 
 
