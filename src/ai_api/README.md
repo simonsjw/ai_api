@@ -39,9 +39,8 @@ This makes the `ai_api` module importable in your scripts.
 - `aiohttp` (for asynchronous HTTP requests)
 - `asyncpg` (for PostgreSQL interactions, via `infopypg`)
 - `SQLAlchemy>=2.0` (for declarative database models)
-- Custom `infopypg` library (for PostgreSQL pooling, setup, and queries; see [README_infopypg.md](README_infopypg.md))
-- Custom `logger` module (for structured logging to files or PostgreSQL; see [README_logger.md](README_logger.md))
-
+- Custom `infopypg` library (for PostgreSQL pooling, setup, and queries; see [README_infopypg.md](https://github.com/simonsjw/infopypg/blob/master/README_infopypg.md))
+- Custom `logger` module (for structured logging to files or PostgreSQL; see [README_logger.md](https://github.com/simonsjw/logger/blob/master/README_logger.md))
 Full environment details are in `environment_grok.yml`. Linting and type-checking are configured via `pyproject.toml` (using `ruff` and `basedpyright`).
 
 ## Usage
