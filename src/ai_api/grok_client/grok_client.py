@@ -68,7 +68,9 @@ max_retries : int, optional
 set_conv_id : bool, optional
     Add a conv_id UUID to each prompt to Grok. Since this id is set at initialisation,
     it will be the same for all prompts sent after the class is initialised. This allows
-    Grok to attempt to use caching, potentially reducing costs.
+    Grok to attempt to use caching, potentially reducing costs. To have the value
+    generated automatically, set to True. Alternatively, pass a string to set to
+    that value.
 
 Returns
 -------
@@ -106,15 +108,13 @@ Examples
 ... )  # None, responses saved to DB
 """
 
-from __future__ import annotations
-
 import asyncio
 import json
 import uuid
-from dataclasses import dataclass, replace
-from datetime import datetime
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, TypedDict, cast, overload
+from typing import Any, Literal, cast, overload
 
 import aiohttp
 from asyncpg import Pool
@@ -123,7 +123,6 @@ from infopypg import (
     ResolvedSettingsDict,
     execute_query,
 )
-from lark.exceptions import MissingVariableError
 from logger import setup_logger
 
 from ai_api.data_structures import (
@@ -156,7 +155,7 @@ class XAIAsyncClient:
         concurrency: int = 50,
         timeout: float = 60.0,
         max_retries: int = 3,
-        set_conv_id: bool = False,
+        set_conv_id: str | bool = False,
     ) -> None:
         self.api_key: str = api_key
         self.base_url: str = "https://api.x.ai/v1/chat/completions"
@@ -167,10 +166,7 @@ class XAIAsyncClient:
         self.max_retries: int = max_retries
         self._resolved_pg_settings: ResolvedSettingsDict | None = resolved_pg_settings
         self.provider_id: int = 0
-        if set_conv_id:
-            self.conv_id: str | None = str(uuid.uuid4())  # Generate once for a session
-        else:
-            self.conv_id = None  # Generate once for a session
+        self._set_conv_id = set_conv_id
 
         if save_mode == "postgres":
             if resolved_pg_settings is None:
@@ -195,6 +191,28 @@ class XAIAsyncClient:
             )
             logger.error(msg=err_string)
             raise ValueError(err_string)
+
+    @property
+    def conv_id(self) -> str | None:
+        """
+        Lazily resolve and return the conversation ID.
+
+        If _set_conv_id is a string, return it directly.
+        If True, generate and cache a UUID v4 string on first access.
+        Otherwise, return None.
+
+        This property ensures efficiency by generating the UUID only when accessed,
+        avoiding overhead in __init__ if conv_id is never used. Subsequent accesses
+        return the cached value without regeneration.
+        """
+        if isinstance(self._set_conv_id, str):
+            return self._set_conv_id  # Direct use if provided as string.
+        elif self._set_conv_id is True:
+            # Generate and cache if configured for auto-generation.
+            self._set_conv_id = str(uuid.uuid4())
+            return self._set_conv_id
+        else:
+            return None  # Default to None if not enabled.
 
     async def _get_provider_id(self) -> int:
         """
@@ -281,7 +299,7 @@ class XAIAsyncClient:
         Path
             Full path to the JSON file.
         """
-        ts = datetime.utcnow().strftime(format="%Y%m%dT%H%M%SZ")
+        ts = datetime.now(UTC).strftime(format="%Y%m%dT%H%M%SZ")
         safe_uid = (req.user_id or "no_user_id").replace("/", "_")
         return self.output_dir / f"{ts}_{safe_uid}_{resp_id}.json"  # type: ignore[arg-type]
 
@@ -415,7 +433,7 @@ class XAIAsyncClient:
 
         connection_pool: Pool = await self._get_pool()
 
-        _ = await execute_query(
+        await execute_query(
             connection_pool,
             query_sql=(
                 "INSERT INTO responses (provider_id, endpoint, request_id, request_tstamp, "
@@ -493,8 +511,8 @@ class XAIAsyncClient:
                         )
 
                         if self.save_mode == "json_files":
-                            path = self._filename_for(req, data["id"])
-                            _ = path.write_text(
+                            path: Path = self._filename_for(req, data["id"])
+                            path.write_text(
                                 data=json.dumps(data, ensure_ascii=False, indent=2)
                             )
                             logger.info(

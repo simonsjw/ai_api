@@ -124,7 +124,7 @@ Logging is handled via the `logger` module, initialised in `grok_client` with `s
   - `concurrency`: Max concurrent requests (default: 50).
   - `timeout`: Request timeout in seconds (default: 60.0).
   - `max_retries`: Retry attempts (default: 3).
-  - `set_conv_id`: Enable conversation ID for caching (default: False).
+  - `set_conv_id`: Enable conversation ID for caching (default: False). True generates the id, Providing a string sets the Conversation ID as that string. 
 
 For database setup, use `infopypg`'s tools to validate and resolve settings (e.g., `validate_dict_to_settings`, `resolve_postgres_connection_settings`).
 
