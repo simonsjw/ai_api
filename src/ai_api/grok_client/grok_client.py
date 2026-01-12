@@ -21,6 +21,8 @@ Key features:
 - Type-safe request/response models using `dataclasses` for immutability and
   automatic generation of methods like `__init__` and `__repr__`.
 - Includes functionality to set conv_id to aid with caching for cost reduction.
+- Accepts output validation model using python dictionaries or pydantic.
+  (Part of the custom GrokRequest model.)
 Notes
 -----
 - This client assumes the xAI API follows OpenAI-compatible chat completion endpoints.
@@ -88,8 +90,10 @@ Examples
 --------
 >>> import asyncio
 >>> from pathlib import Path
->>> from xai_async_client import XAIAsyncClient, GrokRequest, GrokMessage
+>>> from ai_api.grok_client import XAIAsyncClient
+>>> from ai_api.data_structures import GrokRequest, GrokMessage
 >>> from infopypg.pgtypes import ResolvedSettingsDict
+
 >>> # Example with JSON saving
 >>> client = XAIAsyncClient(
 ...     api_key="xai_...", save_mode="json_files", output_dir=Path("outputs")
@@ -106,6 +110,46 @@ Examples
 >>> results_pg = asyncio.run(
 ...     client_pg.submit_batch([req], return_responses=False)
 ... )  # None, responses saved to DB
+
+>>> # Example with structured output validation
+>>> from pydantic import BaseModel
+>>> class MathResponse(BaseModel):
+...     result: int
+...     explanation: str
+>>> req_struct = GrokRequest(
+...     messages=[GrokMessage(role="user", content="What is 2 + 2?")],
+...     structured_schema=MathResponse,  # Or dict schema: {"type": "object", "properties": {...}}
+... )
+>>> results = asyncio.run(client.submit_batch([req_struct]))
+>>> import json
+>>> parsed = json.loads(
+...     results[0].content
+... )  # Or MathResponse.model_validate_json(results[0].content)
+
+>>> # Example of sequential chaining for caching
+>>> async def main():
+... client = XAIAsyncClient(
+...     api_key="xai_...",
+...     save_mode="postgres",  # Or your preferred mode
+...     set_conv_id=True,  # Enables shared conv_id for caching
+... )
+... # Similar prompts (shared prefix for cache hit)
+>>> base_msg = "Analyse the following text: "
+>>> prompts = [
+...     base_msg + "The quick brown fox jumps over the lazy dog.",
+...     base_msg + "The quick brown fox jumps over the lazy cat.",
+...     base_msg + "The quick brown fox jumps over the lazy rabbit.",
+... ]
+>>> responses = []
+>>> for prompt_text in prompts:
+...     messages = [GrokMessage(role="user", content=prompt_text)]
+...     req = GrokRequest(messages=messages, model="grok-beta")
+...     result = await client.submit_batch([req])  # Sequential await
+...     if result:
+...         responses.append(result[0])
+...         print(f"Response: {result[0].content}")
+>>> asyncio.run(main())
+
 """
 
 import asyncio
@@ -114,7 +158,7 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast, overload
+from typing import Any, Literal, Type, cast, overload
 
 import aiohttp
 from asyncpg import Pool
@@ -124,6 +168,7 @@ from infopypg import (
     execute_query,
 )
 from logger import Logger, setup_logger
+from pydantic import BaseModel
 
 from ai_api.data_structures import (
     GrokRequest,
@@ -137,6 +182,7 @@ err_string: str
 logger: Logger = setup_logger(
     logger_name="XAI", log_location=responses_default_settings
 )
+
 logger.info("Initialising XAIAsyncClient with infopypg integration.")
 
 
@@ -160,7 +206,7 @@ class XAIAsyncClient:
         set_conv_id: str | bool = False,
     ) -> None:
         self.api_key: str = api_key
-        self.base_url: str = "https://api.x.ai/v1/chat/completions"
+        self.base_url: str = "https://api.x.ai/v1/responses"
         self.save_mode: SaveMode = save_mode
         self.output_dir: Path | None = output_dir
         self.concurrency: int = concurrency
@@ -185,7 +231,7 @@ class XAIAsyncClient:
 
         elif save_mode == "none":
             err_string = "Functionality not yet defined."
-            logger.error(msg=err_string)
+            print(err_string)
             raise ValueError(err_string)
         else:
             err_string = (
@@ -208,13 +254,13 @@ class XAIAsyncClient:
         return the cached value without regeneration.
         """
         if isinstance(self._set_conv_id, str):
-            return self._set_conv_id  # Direct use if provided as string.
+            return self._set_conv_id                                                      # Direct use if provided as string.
         elif self._set_conv_id is True:
             # Generate and cache if configured for auto-generation.
             self._set_conv_id = str(uuid.uuid4())
             return self._set_conv_id
         else:
-            return None  # Default to None if not enabled.
+            return None                                                                   # Default to None if not enabled.
 
     async def _get_provider_id(self) -> int:
         """
@@ -260,7 +306,11 @@ class XAIAsyncClient:
 
     def _make_payload(self, req: GrokRequest) -> dict[str, Any]:
         """
-        Construct the JSON payload for a Grok API request.
+        Construct the JSON payload for a Grok API request, including structured outputs if specified.
+
+        If structured_schema is a dict, uses it directly as the schema.
+        If it's a Pydantic BaseModel, generates the schema efficiently via model_json_schema().
+        Prioritises efficiency by avoiding unnecessary imports or computations.
 
         Parameters
         ----------
@@ -271,10 +321,17 @@ class XAIAsyncClient:
         -------
         dict[str, Any]
             API-compatible payload.
+
+        Raises
+        ------
+        ValueError
+            If structured_schema is invalid or Pydantic is missing when needed.
         """
         payload: dict[str, Any] = {
             "model": req.model,
-            "messages": req.messages,
+            "messages": [
+                msg.to_dict() for msg in req.messages
+            ],                                                                            # Assuming GrokMessage has to_dict(); adjust if needed
             "temperature": req.temperature,
         }
         if req.max_tokens is not None:
@@ -283,6 +340,37 @@ class XAIAsyncClient:
             payload["user"] = req.user_id
         if req.metadata:
             payload["metadata"] = req.metadata
+
+            # Handle structured outputs if specified
+        if req.structured_schema is not None:
+            if isinstance(req.structured_schema, dict):
+                schema = req.structured_schema
+                name = schema.get(
+                    "title", "structured_response"
+                )                                                                         # Default name if not provided
+            elif (
+                BaseModel is not None
+                and isinstance(req.structured_schema, type)
+                and issubclass(req.structured_schema, BaseModel)
+            ):
+                schema_class = cast(Type[BaseModel], req.structured_schema)
+                schema = schema_class.model_json_schema()                                 # Efficient schema generation
+                name = schema_class.__name__                                              # Use model name for clarity
+            else:
+                raise ValueError(
+                    "structured_schema must be a dict or Pydantic BaseModel. "
+                    "Install pydantic if using models."
+                )
+
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": name,
+                    "schema": schema,
+                    "strict": True,                                                       # Enforces strict adherence for reliability
+                },
+            }
+
         return payload
 
     def _filename_for(self, req: GrokRequest, resp_id: str) -> Path:
@@ -303,7 +391,7 @@ class XAIAsyncClient:
         """
         ts = datetime.now(UTC).strftime(format="%Y%m%dT%H%M%SZ")
         safe_uid = (req.user_id or "no_user_id").replace("/", "_")
-        return self.output_dir / f"{ts}_{safe_uid}_{resp_id}.json"  # type: ignore[arg-type]
+        return self.output_dir / f"{ts}_{safe_uid}_{resp_id}.json"                        # type: ignore[arg-type]
 
     async def _get_pool(self) -> Pool:
         """
@@ -317,7 +405,7 @@ class XAIAsyncClient:
             logger.error("No DB settings available.")
             raise ValueError("DB settings required for PostgreSQL operations.")
 
-        return await PgPoolManager.get_pool(db_settings)  # Efficient singleton pool
+        return await PgPoolManager.get_pool(db_settings)                                  # Efficient singleton pool
 
     async def _save_request_to_postgres(
         self, req: GrokRequest
@@ -354,10 +442,10 @@ class XAIAsyncClient:
             If insert succeeds but no tstamp is returned (safeguard).
         """
         if req.request_id is None:
-            new_id = uuid.uuid4()  # Efficient UUID generation
+            new_id = uuid.uuid4()                                                         # Efficient UUID generation
             req = replace(
                 req, request_id=new_id
-            )  # Immutable copy with ID (replace imported from `dataclasses')
+            )                                                                             # Immutable copy with ID (replace imported from `dataclasses')
 
         if req.request_id is None:
             err_msg = "Failed to set the request id."
@@ -373,7 +461,7 @@ class XAIAsyncClient:
             "MODEL": req.model,
             "ENDPOINT": self.base_url,
         }
-        request_json = self._make_payload(req)  # Reuse payload as request dict
+        request_json = self._make_payload(req)                                            # Reuse payload as request dict
         meta_json = req.metadata or {}
 
         connection_pool: Pool = await self._get_pool()
@@ -430,7 +518,7 @@ class XAIAsyncClient:
             "MODEL": resp.request.model,
             "ENDPOINT": self.base_url,
         }
-        response_id_uuid = uuid.UUID(resp.response_id)  # Convert string to UUID
+        response_id_uuid = uuid.UUID(resp.response_id)                                    # Convert string to UUID
         meta_json = resp.request.metadata or {}
 
         connection_pool: Pool = await self._get_pool()
@@ -481,7 +569,7 @@ class XAIAsyncClient:
 
             payload = self._make_payload(req)
 
-            if self.conv_id:  # Reuse same ID for related requests
+            if self.conv_id:                                                              # Reuse same ID for related requests
                 headers = {
                     "Authorization": f"Bearer {self.api_key}",
                     "x-grok-conv-id": self.conv_id,
@@ -555,14 +643,23 @@ class XAIAsyncClient:
             return RuntimeError("Unreachable")
 
     @overload
+    async def submit_batch(self, requests: list[GrokRequest]) -> list[GrokResponse]: ...
+
+    # Overload for default (return_responses=True): returns list.
+
+    @overload
     async def submit_batch(
         self, requests: list[GrokRequest], return_responses: Literal[True]
     ) -> list[GrokResponse]: ...
+
+    # Explicit True: same as default, returns list.
 
     @overload
     async def submit_batch(
         self, requests: list[GrokRequest], return_responses: Literal[False]
     ) -> None: ...
+
+    # Explicit False: returns None.
 
     async def submit_batch(
         self, requests: list[GrokRequest], return_responses: bool = True
@@ -570,27 +667,37 @@ class XAIAsyncClient:
         """
         Submit a batch of requests in parallel and optionally return responses.
 
-        Uses asyncio.gather for concurrency, limited by semaphore. Filters out
-        failed tasks (logged as errors) and returns successful responses if requested.
+        This method uses asyncio.gather for concurrent execution, constrained by
+        a semaphore to limit parallelism. It filters out exceptions (logging them)
+        and collects successful responses. The flow is:
+        1. Check for empty requests and early return.
+        2. Create semaphore based on client concurrency limit.
+        3. Open aiohttp session.
+        4. Generate tasks for each request.
+        5. Await gathered tasks, ignoring exceptions in results.
+        6. Collect valid responses.
+        7. Return responses if requested, else None.
 
         Parameters
         ----------
         requests : list[GrokRequest]
-            List of requests to submit.
+            List of API requests to process concurrently.
         return_responses : bool, optional
-            If True (default), return list of successful GrokResponse; else None.
+            Flag to return collected responses (default: True).
 
         Returns
         -------
         list[GrokResponse] | None
-            Successful responses or None based on return_responses.
+            List of successful responses if return_responses is True; else None.
+
+        Raises
+        ------
+        No explicit raises; exceptions from tasks are logged, not propagated.
 
         Examples
         --------
         >>> await client.submit_batch([req1, req2])  # Returns [resp1, resp2]
-        >>> await client.submit_batch(
-        ...     [req1, req2], return_responses=False
-        ... )  # Returns None, saves only
+        >>> await client.submit_batch([req1, req2], return_responses=False)  # Returns None
         """
         if not requests:
             return [] if return_responses else None
@@ -611,8 +718,7 @@ class XAIAsyncClient:
 
         return responses if return_responses else None
 
-
-#  LocalWords:  infopypg's XAI infopypg conv UUID Authorization Postgres GrokRequest
-#  LocalWords:  ResolvedSettingsDict PostgresError pyrefly PgPoolManager asyncpg init
-#  LocalWords:  XAIAsyncClient bool repr asyncio postgres GrokResponse tstamp jsonb req
-#  LocalWords:  RuntimeError datetime
+    #  LocalWords:  infopypg's XAI infopypg conv UUID Authorization Postgres GrokRequest
+    #  LocalWords:  ResolvedSettingsDict PostgresError pyrefly PgPoolManager asyncpg init
+    #  LocalWords:  XAIAsyncClient bool repr asyncio postgres GrokResponse tstamp jsonb req
+    #  LocalWords:  RuntimeError datetime localhost GrokMessage ValueError
