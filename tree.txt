@@ -1,0 +1,29 @@
+./
+├── src/
+│   └── ai_api/
+│       ├── data_structures/
+│       │   ├── .mypy_cache/
+│       │   ├── db_responses_schema.py
+│       │   ├── db_responses_schema.pyi
+│       │   ├── __init__.py
+│       │   ├── LLM_types_grok.py
+│       │   ├── LLM_types_grok.pyi
+│       │   ├── LLM_types_openai.py
+│       │   ├── LLM_types_openai.pyi
+│       │   ├── py.typed
+│       │   └── README_LLM_types.md
+│       ├── grok_client/
+│       │   ├── .mypy_cache/
+│       │   ├── grok_client.py
+│       │   ├── grok_client.pyi
+│       │   ├── __init__.py
+│       │   └── py.typed
+│       ├── __init__.py
+│       └── README.md
+├── .aspell.en.pws
+├── .dir-locals.el
+├── .env
+├── .gitignore
+├── pyproject.toml
+└── tree.txt
+
