@@ -350,6 +350,12 @@ class OllamaConcreteClient(BaseAsyncProviderClient):
 
             payload = req.to_dict()
 
+            if req.backend_options:
+                if hasattr(req.backend_options, "to_dict"):
+                    payload["options"] = req.backend_options.to_dict()
+                else:
+                    payload["options"] = dict(req.backend_options)
+
             for attempt in range(self.max_retries + 1):
                 try:
                     async with session.post(
@@ -429,6 +435,12 @@ class OllamaConcreteClient(BaseAsyncProviderClient):
         """
         headers = {"Content-Type": "application/json"}
         payload = {**request.to_dict(), "stream": True}
+
+        if request.backend_options:
+            if hasattr(request.backend_options, "to_dict"):
+                payload["options"] = request.backend_options.to_dict()
+            else:
+                payload["options"] = dict(request.backend_options)
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
