@@ -252,21 +252,21 @@ class Logs(Base):
 
 async def main() -> None:
     # Build (connects to 'postgres' for creation).
-    builder: DatabaseBuilder = DatabaseBuilder(
-        settings_dictionary={
-            "db_user": "postgres",
-            "db_host": "127.0.0.1",
-            "db_port": "5432",
-            "db_name": "responsesdb",
-            "password": getenv("POSTGRES_U_POSTGRES_PW"),
-            "tablespace_name": "responses_db",
-            "tablespace_path": "/mnt/HDD03_HIT_03TB/no_backup/pg03/responses_db",
-            "extensions": [
-                "uuid-ossp",                                                              # For potential UUIDs.
-                "postgres_fdw" "pg_trgm",                                                 # For text search if needed.
-            ],
-        }
-    )
+    settings = {
+        "db_user": "postgres",
+        "db_host": "127.0.0.1",
+        "db_port": "5432",
+        "db_name": "responsesdb",
+        "password": getenv("POSTGRES_U_POSTGRES_PW"),
+        "tablespace_name": "responses_db",
+        "tablespace_path": "/mnt/HDD03_HIT_03TB/no_backup/pg03/responses_db",
+        "extensions": [
+            "uuid-ossp",                                                                  # For potential UUIDs.
+            "postgres_fdw" "pg_trgm",                                                     # For text search if needed.
+        ],
+    }
+    # settings_dict: SettingsDict = validate_dict_to_SettingsDict(settings)
+    builder: DatabaseBuilder = DatabaseBuilder(settings)
     await builder.build()
 
     print("Database initialised.")
