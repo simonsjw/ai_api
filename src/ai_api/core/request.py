@@ -58,8 +58,8 @@ class LLMRequest:
         Ollama).
     provider_options : dict[str, Any] | None, optional
         Grok-specific fields (store, previous_response_id, …).
-    backend_options : dict[str, Any] | None, optional
-        Ollama-specific fields (num_ctx, keep_alive, repeat_penalty, …).
+    backend_options: dict[str, Any] | OllamaOptions | None = None
+        # Ollama-specific fields (num_ctx, num_gpu, etc.). Use OllamaOptions for type safety.
     sys_spec : dict[str, Any] | None, optional
         Hardware-level metadata (quantisation, expected_vram_gb,
         min_spare_vram_gb). Saved in persistence meta JSONB; used later
