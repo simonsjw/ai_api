@@ -25,8 +25,10 @@ dev = [
   "pyrefly",
   "basedpyright",
   "pytest",
-] # Development tools: linter, type checker, tester
-
+  "pytest-asyncio>=0.23.0",
+  "aioresponses>=0.7.6",
+  "pytest-mock>=3.14.0",
+]
 [build-system] # Build system configuration
 requires = ["setuptools>=61.0"]         # Requirements for building the package
 build-backend = "setuptools.build_meta" # Backend used for building
