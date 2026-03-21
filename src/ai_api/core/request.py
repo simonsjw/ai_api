@@ -64,6 +64,7 @@ class LLMRequest:
         Hardware-level metadata (quantisation, expected_vram_gb,
         min_spare_vram_gb). Saved in persistence meta JSONB; used later
         by resource-estimation module.
+    capture_reasoning: bool, default false.
 
     Notes
     -----
@@ -71,6 +72,11 @@ class LLMRequest:
     - `to_dict` produces a minimal payload suitable for any concrete client.
     - Structured schema is automatically converted to the correct
       `response_format` key.
+    - capture_reasoning - If True, request and extract reasoning/thinking traces
+      when the model provides them.
+      Grok-4: adds include=["reasoning.encrypted_content"]
+      Ollama: parses <think> tags or reasoning_content field.
+      Default False to reduce token usage.
     """
 
     input: GrokInput
@@ -85,6 +91,7 @@ class LLMRequest:
     provider_options: dict[str, Any] | None = None
     backend_options: dict[str, Any] | None = None
     sys_spec: dict[str, Any] | None = None
+    capture_reasoning: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """

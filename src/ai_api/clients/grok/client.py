@@ -321,8 +321,11 @@ class GrokConcreteClient(BaseAsyncProviderClient):
                             raise aiohttp.ClientError(f"HTTP {resp.status}: {txt}")
 
                         data = await resp.json()
-                        response = LLMResponse.from_raw(data, provider="grok")
-
+                        response: LLMResponse = LLMResponse.from_raw(
+                            data,
+                            provider="grok",
+                            capture_reasoning=req.capture_reasoning,
+                        )
                         if self.save_mode == "json_files" and self.output_dir:
                             path = self._filename_for(response.id)
                             path.write_text(
@@ -372,13 +375,28 @@ class GrokConcreteClient(BaseAsyncProviderClient):
 
         return responses if return_responses else None
 
+    def _ensure_include_list(self, payload: dict[str, Any]) -> list[str]:
+        """Safely ensure 'include' is always a list before appending."""
+        if "include" not in payload or not isinstance(payload.get("include"), list):
+            payload["include"] = []
+        return payload["include"]
+
     async def stream(self, request: LLMRequest) -> AsyncIterator[StreamingChunk]:
-        """Token-by-token streaming (new but fully compatible with original persistence)."""
+        """
+        Token-by-token streaming with optional live reasoning extraction.
+        Now 100% type-safe (no more Pyrefly 'bool has no append' error).
+        """
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             **({"x-grok-conv-id": self.conv_id} if self.conv_id else {}),
         }
         payload = {**request.to_dict(), "stream": True}
+
+        # === GROK-SPECIFIC: request reasoning when asked ===
+        if request.capture_reasoning:
+            includes = self._ensure_include_list(payload)
+            if "reasoning.encrypted_content" not in includes:
+                includes.append("reasoning.encrypted_content")
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -393,21 +411,41 @@ class GrokConcreteClient(BaseAsyncProviderClient):
 
                 async for line in resp.content:
                     line_str = line.decode("utf-8").strip()
-                    if line_str.startswith("data: "):
-                        data_str = line_str[6:]
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            chunk_data = json.loads(data_str)
-                            delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-                            text = delta.get("content", "")
-                            yield StreamingChunk(
-                                delta_text=text,
-                                finished=chunk_data.get("done", False),
-                                raw_chunk=chunk_data,
-                            )
-                        except json.JSONDecodeError:
-                            continue
+                    if not line_str.startswith("data: "):
+                        continue
+                    data_str = line_str[6:]
+                    if data_str == "[DONE]":
+                        break
+
+                    try:
+                        chunk_data = json.loads(data_str)
+                        choice = chunk_data.get("choices", [{}])[0]
+                        delta = choice.get("delta", {})
+
+                        text = delta.get("content", "") or ""
+                        reasoning_delta = None
+
+                        if request.capture_reasoning:
+                            reasoning_delta = delta.get(
+                                "reasoning_content"
+                            ) or delta.get("reasoning", {}).get("encrypted_content")
+                            if (
+                                reasoning_delta
+                                and "encrypted" in str(reasoning_delta).lower()
+                            ):
+                                self.logger.warning(
+                                    "Grok-4 returned encrypted reasoning in stream"
+                                )
+
+                        yield StreamingChunk(
+                            delta_text=text,
+                            reasoning_delta=reasoning_delta,
+                            finished=chunk_data.get("done", False)
+                            or choice.get("finish_reason") is not None,
+                            raw_chunk=chunk_data,
+                        )
+                    except json.JSONDecodeError:
+                        continue
 
     def can_stream(self) -> bool:
         return True

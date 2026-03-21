@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import traceback
 import uuid
 from collections.abc import AsyncIterator
@@ -369,7 +370,11 @@ class OllamaConcreteClient(BaseAsyncProviderClient):
                             raise aiohttp.ClientError(f"HTTP {resp.status}: {txt}")
 
                         data = await resp.json()
-                        ollama_resp = LLMResponse.from_raw(data, "ollama")
+                        ollama_resp = LLMResponse.from_raw(
+                            data,
+                            provider="ollama",
+                            capture_reasoning=req.capture_reasoning,
+                        )
 
                         if self.save_mode == "json_files":
                             path = self._filename_for(ollama_resp.id)
@@ -423,19 +428,26 @@ class OllamaConcreteClient(BaseAsyncProviderClient):
         return responses if return_responses else None
 
     @override
-    async def stream(self, request: LLMRequest) -> AsyncIterator[StreamingChunk]:         # type: ignore[override]   # Pyrefly strict abstract async override
+    async def stream(self, request: LLMRequest) -> AsyncIterator[StreamingChunk]:
         """
-        Streams tokens from Ollama (SSE format via OpenAI-compat endpoint).
+        Streams tokens from Ollama (SSE format via OpenAI-compat endpoint)
+        with optional live reasoning extraction.
+
+        When request.capture_reasoning=True:
+        - Parses <think>...</think> tags or reasoning_content field
+        - reasoning_delta is yielded live
+        - (Optional) reasoning is stripped from visible delta_text
 
         Yields
         ------
         StreamingChunk
-            One per token or final chunk. Continuation token extracted
+            One per token (or final chunk). Continuation token extracted
             from final response.
         """
         headers = {"Content-Type": "application/json"}
         payload = {**request.to_dict(), "stream": True}
 
+        # Ollama hardware/runtime options (unchanged from your previous addition)
         if request.backend_options:
             if hasattr(request.backend_options, "to_dict"):
                 payload["options"] = request.backend_options.to_dict()
@@ -466,8 +478,25 @@ class OllamaConcreteClient(BaseAsyncProviderClient):
                             finished = chunk.get("done", False)
                             context = chunk.get("context")                                # native Ollama continuation
 
+                            # === NEW: Reasoning extraction for Ollama ===
+                            reasoning_delta: str | None = None
+                            if request.capture_reasoning:
+                                # Look for <think> tags (most common in DeepSeek-R1, Qwen, etc.)
+                                match = re.search(
+                                    r"<think>(.*?)</think>",
+                                    text,
+                                    re.DOTALL | re.IGNORECASE,
+                                )
+                                if match:
+                                    reasoning_delta = match.group(1).strip()
+                                    # Strip reasoning from visible text (clean final answer)
+                                    text = text.replace(match.group(0), "").strip()
+                                elif "reasoning_content" in chunk:
+                                    reasoning_delta = chunk["reasoning_content"]
+
                             yield StreamingChunk(
                                 delta_text=text,
+                                reasoning_delta=reasoning_delta,
                                 finished=finished,
                                 raw_chunk=chunk,
                             )
@@ -476,6 +505,7 @@ class OllamaConcreteClient(BaseAsyncProviderClient):
                                 # continuation_token is set on the final chunk
                                 # (handled by LLMResponse.from_raw in batch mode)
                                 pass
+
                         except json.JSONDecodeError:
                             continue
 

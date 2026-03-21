@@ -15,6 +15,7 @@ Streaming support is included here (as a lightweight dataclass) so that
 `submit_batch` and `stream` share the same response vocabulary.
 """
 
+import re
 from collections.abc import AsyncIterable
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -56,11 +57,14 @@ class LLMResponse:
         Original provider payload (for debugging / forward compatibility).
     extra : dict[str, Any]
         Provider-specific fields (Ollama timings, Grok reasoning, …).
+    reasoning_content: Extracted chain-of-thought / reasoning trace when
+        capture_reasoning=True.
 
     Notes
     -----
     - Frozen for safety in async batches and logging.
     - `.text` and `.tool_calls` properties mirror existing GrokResponse.
+    - For Grok-4 reasoning_content may be encrypted (logged as warning).
     """
 
     id: str
@@ -73,6 +77,7 @@ class LLMResponse:
     continuation_token: ContinuationToken = None
     raw: dict[str, Any] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
+    reasoning_content: str | None = None
 
     @classmethod
     def from_raw(
@@ -80,6 +85,7 @@ class LLMResponse:
         raw: dict[str, Any],
         provider: ProviderLiteral,
         continuation_token: ContinuationToken = None,
+        capture_reasoning: bool = False,
     ) -> "LLMResponse":
         """
         Factory that converts a raw provider response into the unified shape.
@@ -92,6 +98,8 @@ class LLMResponse:
             Which back-end produced the response.
         continuation_token : ContinuationToken, optional
             Pre-extracted token (Grok header or Ollama context).
+        reasoning_content: bool, default False
+            Return the reasoning content if available.
 
         Returns
         -------
@@ -105,8 +113,33 @@ class LLMResponse:
         3. For Ollama, map native fields directly.
         4. Store everything in .raw and .extra for full fidelity.
         """
+        reasoning_content: str | None = None
+
+        if capture_reasoning:
+            if provider == "grok":
+                # Grok reasoning lives in choices[0].message
+                msg = raw.get("choices", [{}])[0].get("message", {})
+                reasoning_content = msg.get("reasoning_content") or msg.get(
+                    "reasoning", {}
+                ).get("encrypted_content")
+                if reasoning_content and "encrypted" in str(reasoning_content).lower():
+                    logger.warning("Grok-4 returned encrypted reasoning_content")
+            else:                                                                         # Ollama
+                content = raw.get("message", {}).get("content", "") or raw.get(
+                    "response", ""
+                )
+                match = re.search(
+                    r"<think>(.*?)</think>", content, re.DOTALL | re.IGNORECASE
+                )
+                if match:
+                    reasoning_content = match.group(1).strip()
+                elif "reasoning_content" in raw:
+                    reasoning_content = raw["reasoning_content"]
+
         if provider == "grok":
-            grok_resp = GrokResponse.from_dict(raw)                                       # reuse existing parser
+            grok_resp: GrokResponse = GrokResponse.from_dict(
+                raw
+            )                                                                             # ← kept 100% unchanged
             return cls(
                 id=grok_resp.id,
                 created_at=grok_resp.created_at,
@@ -118,9 +151,10 @@ class LLMResponse:
                 continuation_token=continuation_token,
                 raw=raw,
                 extra={},
+                reasoning_content=reasoning_content,
             )
 
-        # Ollama path (native or OpenAI-compat)
+        # Ollama path (native or OpenAI-compat) — unchanged except for reasoning
         output = raw.get("message", {}).get("content", "") or raw.get("response", "")
         return cls(
             id=raw.get("id", "ollama-unknown"),
@@ -137,20 +171,32 @@ class LLMResponse:
                 "load_duration": raw.get("load_duration"),
                 "eval_count": raw.get("eval_count"),
             },
+            reasoning_content=reasoning_content,                                          # ← NEW
         )
 
 
 @dataclass(frozen=True)
 class StreamingChunk:
     """
-    Single token (or partial tool call) yielded during streaming.
+    A single token (or reasoning) chunk from a streaming LLM response.
 
-    Used by `client.stream(...)` for both Grok and Ollama. Keeps the
-    streaming interface identical regardless of provider.
+    NEW: reasoning_delta gives you live chain-of-thought output when
+    capture_reasoning=True and the model is a reasoning model (Grok-4,
+    DeepSeek-R1, Qwen2.5, etc.).
     """
 
-    delta_text: str
+    delta_text: str = ""                                                                  # Normal content that goes to the final answer
+    reasoning_delta: str | None = None                                                    # Live reasoning / <think> content
     finished: bool = False
-    tool_call_delta: dict[str, Any] | None = None
-    usage_partial: dict[str, Any] | None = None
-    raw_chunk: Any = None
+    raw_chunk: dict[str, Any] = field(default_factory=dict)
+    usage: dict[str, Any] | None = None                                                   # Only populated on the final chunk
+
+    @property
+    def has_reasoning(self) -> bool:
+        """Convenience check for templates/UI."""
+        return self.reasoning_delta is not None and self.reasoning_delta.strip() != ""
+
+    def __str__(self) -> str:
+        if self.has_reasoning:
+            return f"Thinking: {self.reasoning_delta!r} | Text: {self.delta_text!r}"
+        return self.delta_text
