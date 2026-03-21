@@ -1,12 +1,12 @@
 [project]
 name = "ai_api"
-version = "0.1.0"
+version = "1.1.0"
 authors = [{ name = "Simon Watson", email = "simon_watson_sjw@hotmail.com" }]
 maintainers = [
   { name = "Simon Watson", email = "simon_watson_sjw@hotmail.com" },
 ]
-description = "Tools for interacting with AI APIs. "
-keywords = ["Grok", "xAI", "LLM", "API"]
+description = "Unified async clients for Grok (xAI) and Ollama LLMs with batching, streaming, and PostgreSQL persistence"
+keywords = ["LLM", "Grok", "Ollama", "async", "postgres", "streaming"]
 license = { text = "MIT License" }
 readme = "README.md"
 requires-python = ">=3.12"
