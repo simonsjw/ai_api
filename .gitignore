@@ -1,6 +1,20 @@
-grok_client.egg-info/
-src/ai_api.egg-info/
-src/ai_api/grok_client/__pycache__/
-src/ai_api/data_structures/__pycache__/
-src/ai_api/__pycache__/
+# Environment
 .env
+.env.local
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+
+# Editor / personal files
+.dir-locals.el
+.aspell.en.pws
+
+# Build artifacts
+dist/
+build/
