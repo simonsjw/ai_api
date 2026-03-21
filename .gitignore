@@ -3,3 +3,4 @@ src/ai_api.egg-info/
 src/ai_api/grok_client/__pycache__/
 src/ai_api/data_structures/__pycache__/
 src/ai_api/__pycache__/
+.env
