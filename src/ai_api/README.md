@@ -5,234 +5,250 @@
 
 ## Overview
 
-ai_api is a modular Python library for interacting with the xAI Grok API, focusing on asynchronous batched requests, retry logic, and optional persistence of requests and responses. It supports saving to local JSON files or a PostgreSQL database, leveraging the custom `infopypg` library for efficient database operations (e.g., connection pooling and incremental setup). The module is structured into two subpackages: `data_structures` for type definitions and database schemas, and `grok_client` for the asynchronous API client.
+`ai_api` is a modular Python library for interacting with the xAI Grok API (`/v1/responses`), with a focus on:
+
+- asynchronous batched requests
+- configurable concurrency and automatic retries
+- optional persistence of requests and responses (JSON files or PostgreSQL via `infopypg`)
+- type-safe, immutable dataclasses for requests and responses
+
+It is designed to work efficiently in the `grok` conda environment and integrates tightly with the custom `infopypg` and `logger` modules.
 
 Key features:
-- **Asynchronous Batched Requests**: Uses `aiohttp` for concurrent API calls to the Grok chat completions endpoint, with configurable concurrency, timeouts, and retries with exponential backoff.
-- **Persistence Options**: No saving ("none"), JSON files ("json_files"), or PostgreSQL ("postgres") via `infopypg`. Database mode uses partitioned tables for scalability (e.g., daily ranges on timestamps).
-- **Type-Safe Models**: TypedDicts and dataclasses for OpenAI-compatible and Grok-specific request/response structures, ensuring structural consistency.
-- **Logging Integration**: Utilises a custom `logger` module for structured logging to files or PostgreSQL, with automatic setup and lazy initialisation.
-- **Database Schema**: Normalised tables for providers, requests, responses, and logs, defined via SQLAlchemy models in `data_structures`.
-- Designed for the `grok` conda environment; assumes dependencies like `aiohttp`, `asyncpg`, `infopypg`, and `logger` are available.
 
-This library prioritises efficiency (e.g., shared connection pools from `infopypg`) and modularity, avoiding heavy ORM overhead while supporting scalable data capture for LLM interactions. It assumes the xAI API follows OpenAI-compatible schemas and integrates with `infopypg` for PostgreSQL setup (e.g., incremental creation of tablespaces, databases, extensions, and tables).
+- Concurrent API calls using `aiohttp` + semaphore-limited parallelism
+- Exponential backoff retries for transient failures
+- Persistence modes: `"none"`, `"json_files"`, `"postgres"` (partitioned tables)
+- Immutable dataclasses: `GrokMessage`, `GrokInput`, `GrokRequest`, `GrokResponse`
+- Structured JSON output support via Pydantic models or dict schemas
+- Conversation-level caching support via `x-grok-conv-id` header
+- Structured logging to file or PostgreSQL
 
 ## Installation
 
-This package is intended for use within the `grok` conda environment (as defined in `environment_grok.yml`). To install as an editable package:
+Activate your `grok` conda environment and install the package in editable mode:
 
-1. Navigate to the project root (where `pyproject.toml` resides).
-2. Activate the `grok` environment:
-   ```
-   conda activate grok
-   ```
-3. Install via pip:
-   ```
-   pip install -e .
-   ```
+```bash
+conda activate grok
+cd /path/to/ai_api
+pip install -e .
+```
 
-This makes the `ai_api` module importable in your scripts.
-
-### Dependencies
-
-- Python 3.12+
-- `aiohttp` (for asynchronous HTTP requests)
-- `asyncpg` (for PostgreSQL interactions, via `infopypg`)
-- `SQLAlchemy>=2.0` (for declarative database models)
-- Custom `infopypg` library (for PostgreSQL pooling, setup, and queries; see [README_infopypg.md](https://github.com/simonsjw/infopypg/blob/master/README_infopypg.md))
-- Custom `logger` module (for structured logging to files or PostgreSQL; see [README_logger.md](https://github.com/simonsjw/logger/blob/master/README_logger.md))
-Full environment details are in `environment_grok.yml`. Linting and type-checking are configured via `pyproject.toml` (using `ruff` and `basedpyright`).
+Dependencies are listed in `environment_grok.yml`.
 
 ## Usage
 
-### Data Structures
+### Creating Requests
 
-The `data_structures` subpackage provides types and schemas:
+Requests are now built using `GrokInput` (which wraps an immutable tuple of `GrokMessage` instances).
 
 ```python
-from ai_api.data_structures import GrokRequest, GrokMessage, GrokResponse, responses_default_settings, Providers, Responses
+from ai_api.data_structures import GrokMessage, GrokInput, GrokRequest
 
-# Example request
-messages = [GrokMessage(role="user", content="Hello, Grok!")]
-req = GrokRequest(messages=messages, model="grok-beta")
+# Basic text request
+messages = [{"role": "user", "content": "Hello, Grok!"}]
+grok_input = GrokInput.from_list(messages)
+req = GrokRequest(input=grok_input, model="grok-3")
+
+# Multimodal example
+messages = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": "Describe this image."},
+            {"type": "input_image", "image_url": "https://example.com/img.jpg", "detail": "high"},
+        ],
+    }
+]
+grok_input = GrokInput.from_list(messages)
+req = GrokRequest(input=grok_input)
 ```
 
-For PostgreSQL schemas, use SQLAlchemy models like `Providers` and `Responses` with `infopypg`'s `DatabaseBuilder` for setup.
-
-### Grok Client
-
-The `grok_client` subpackage provides the asynchronous client:
+### Basic Client Usage
 
 ```python
 import asyncio
 from pathlib import Path
 from ai_api.grok_client import XAIAsyncClient
-from ai_api.data_structures import GrokRequest, GrokMessage
+from ai_api.data_structures import GrokInput, GrokMessage, GrokRequest
 from infopypg.pgtypes import ResolvedSettingsDict
 
-# Example with JSON saving
-client = XAIAsyncClient(
-    api_key="xai_...",
-    save_mode="json_files",
-    output_dir=Path("outputs"),
-    concurrency=50,
-    timeout=60.0,
-    max_retries=3,
-    set_conv_id=True,  # Optional for caching
+async def main():
+    client = await XAIAsyncClient(
+        api_key="xai_...",
+        save_mode="json_files",
+        output_dir=Path("outputs"),
+        concurrency=50,
+        timeout=60.0,
+        max_retries=3,
+        set_conv_id=True,           # recommended for cost reduction on similar prompts
+    )
+
+    # Single request
+    messages = [{"role": "user", "content": "What is the capital of Australia?"}]
+    grok_input = GrokInput.from_list(messages)
+    req = GrokRequest(input=grok_input)
+    results = await client.submit_batch([req])
+    
+    return results
+
+results = asyncio.run(main())
+
+if results:
+    print(results[0].text)                  # → "The capital of Australia is Canberra."
+    print(results[0].usage)                 # token counts
+```
+
+### Structured Output (JSON mode)
+
+```python
+from pydantic import BaseModel, Field
+
+class MathAnswer(BaseModel):
+    value: int = Field(description="The numerical result")
+    reasoning: str = Field(description="Step-by-step explanation")
+
+messages = [{"role": "user", "content": "What is 17 × 42? Return JSON."}]
+grok_input = GrokInput.from_list(messages)
+
+req = GrokRequest(
+    input=grok_input,
+    structured_schema=MathAnswer,    # this instructs the model to return the content in JSON. 
+    temperature=0.1,
+    max_output_tokens=300,
 )
 
-messages = [GrokMessage(role="user", content="Hello, Grok!")]
-req = GrokRequest(messages=messages)
-results = await client.submit_batch([req])
-if results:
-    print(results[0].content)  # Prints the response content
+async def main():
+    client = await XAIAsyncClient(
+        api_key="xai_...",
+        save_mode="json_files", # save response to JSON file, not return the content in JSON. 
+        output_dir=Path("outputs"),
+        concurrency=50,
+        timeout=60.0,
+        max_retries=3,
+        set_conv_id=True,           # recommended for cost reduction on similar prompts
+    )
+    results = await client.submit_batch([req])
+    
+    return results
+    
+results = asyncio.run(main())
 
-# Example with PostgreSQL saving (using infopypg ResolvedSettingsDict)
+if results:
+    print(results[0].text)                  # JSON string
+    # parsed = MathAnswer.model_validate_json(results[0].text)
+```
+
+### PostgreSQL Persistence
+
+```python
+from infopypg.pgtypes import ResolvedSettingsDict
+
 pg_settings: ResolvedSettingsDict = {
-    "DB_USER": "postgres",
-    "DB_HOST": "127.0.0.1",
+    "DB_USER": "simon",
+    "DB_HOST": "localhost",
     "DB_PORT": "5432",
-    "DB_NAME": "responses_db",
-    "PASSWORD": "your_password",
-    "TABLESPACE_NAME": "responses_db",
-    "TABLESPACE_PATH": "/mnt/HDD03_HIT_03TB/no_backup/pg03/responses_db",
-    "EXTENSIONS": ["uuid-ossp", "pg_trgm"],
+    "DB_NAME": "grok_responses",
+    "PASSWORD": "...",
+    # ... other infopypg settings
 }
 
-client_pg = XAIAsyncClient(
+async def main():
+    client_pg = await XAIAsyncClient(
     api_key="xai_...",
     save_mode="postgres",
     resolved_pg_settings=pg_settings,
-)
+    set_conv_id=True,
+    )
+    await client_pg.submit_batch([req], return_responses=False)
 
-await client_pg.submit_batch([req], return_responses=False)  # Saves to DB, returns None
+# Save only — no results returned
+asyncio.run(main())
 ```
 
-For PostgreSQL mode, ensure the database is set up using `infopypg`'s `DatabaseBuilder` with the schema from `db_responses_schema.py` (e.g., partitioned tables for requests/responses/logs).
+### Sequential Chaining for Cache Reuse
 
-### Logging
-
-Logging is handled via the `logger` module, initialised in `grok_client` with `setup_logger`. For PostgreSQL logging, pass a `ResolvedSettingsDict` to `setup_logger` as described in [README_logger.md](README_logger.md). Queries can be executed using `infopypg`'s `execute_query` or the logger's `query_logs`.
-
-## Configuration Options
-
-- **XAIAsyncClient Parameters**:
-  - `api_key`: Required xAI API key.
-  - `save_mode`: "none" (default), "json_files", or "postgres".
-  - `resolved_pg_settings`: Required for "postgres" (from `infopypg`).
-  - `output_dir`: Required for "json_files".
-  - `concurrency`: Max concurrent requests (default: 50).
-  - `timeout`: Request timeout in seconds (default: 60.0).
-  - `max_retries`: Retry attempts (default: 3).
-  - `set_conv_id`: Enable conversation ID for caching (default: False). True generates the id, Providing a string sets the Conversation ID as that string. 
-
-For database setup, use `infopypg`'s tools to validate and resolve settings (e.g., `validate_dict_to_settings`, `resolve_postgres_connection_settings`).
-
-## Examples
-
-### Batched Requests with Persistence
+To get the maximum benefit from Grok's conversation caching use the below approach. 
+The first prompt populates the cache; later similar prompts should reuse tokens for the shared prefix.
 
 ```python
-requests = [GrokRequest(messages=[GrokMessage(role="user", content=f"Query {i}")]) for i in range(10)]
-await client.submit_batch(requests)  # Processes batch asynchronously
+async def main():
+    client = await XAIAsyncClient(
+        api_key="xai_...",
+        save_mode="json_files",
+        output_dir=Path("cache_test"),
+        set_conv_id=True,                    # same conv_id across calls
+    )
+
+    base = "Carefully analyse this sentence: "
+    variants = [
+        "The quick brown fox jumps over the lazy dog.",
+        "The quick brown fox leaps over the lazy cat.",
+        "The quick brown fox bounds over the sleepy rabbit.",
+    ]
+
+    for text in variants:
+        messages = [{"role": "user", "content": base + text}]
+        inp = GrokInput.from_list(messages)
+        req = GrokRequest(input=inp, temperature=1.1, max_output_tokens=400)
+
+        results = await client.submit_batch([req])
+        if results:
+            print(f"→ {results[0].text[:80]}…")
+
+asyncio.run(main())
 ```
 
-### Database Setup
+
+## Database Setup
+
+Use `infopypg.DatabaseBuilder` to create the schema:
 
 ```python
-import asyncio
 from infopypg import DatabaseBuilder
-from ai_api.data_structures import responses_default_settings  # Default ResolvedSettingsDict
+from ai_api.data_structures import responses_default_settings
 
-async def setup_db():
+async def setup():
     builder = DatabaseBuilder(
         spec_path="src/ai_api/data_structures/db_responses_schema.py",
         resolved_settings=responses_default_settings,
     )
-    await builder.build()  # Creates tablespace, DB, extensions, and tables if missing
+    await builder.build()
 
-asyncio.run(setup_db())
+asyncio.run(setup())
 ```
 
-### Sequential Chaining for Caching
+This creates partitioned tables (`requests`, `responses`, etc.) with daily ranges.
 
-To enable caching with `set_conv_id=True`, process similar prompts sequentially:
-
-```python
-import asyncio
-from ai_api.grok_client import XAIAsyncClient
-from ai_api.data_structures import GrokRequest, GrokMessage
-
-async def main():
-    client = XAIAsyncClient(
-        api_key="xai_...",
-        save_mode="none",  # Or your preferred mode
-        set_conv_id=True,  # Enables shared conv_id for caching
-    )
-
-    # Similar prompts (shared prefix for cache hit)
-    base_msg = "Analyse the following text: "
-    prompts = [
-        base_msg + "The quick brown fox jumps over the lazy dog.",
-        base_msg + "The quick brown fox jumps over the lazy cat.",
-        base_msg + "The quick brown fox jumps over the lazy rabbit.",
-    ]
-
-    responses = []
-    for prompt_text in prompts:
-        messages = [GrokMessage(role="user", content=prompt_text)]
-        req = GrokRequest(messages=messages, model="grok-beta")
-        result = await client.submit_batch([req])  # Sequential await
-        if result:
-            responses.append(result[0])
-            print(f"Response: {result[0].content}")
-
-asyncio.run(main())
+## Project Structure
 
 ```
-
-For multiple similar prompts (e.g., sharing a prefix like "Analyse the following text: "), sequential chaining allows the first response to populate Grok's cache. Subsequent prompts hit this cache, reducing token usage and costs (potentially by 50-90% for overlapping text, per xAI docs). This is efficient for workflows like batch analysis of variants, avoiding parallel race conditions where no cache exists yet.
-
-
-## Development and Structure
-
-- **Source Layout**:
-  ```
-  ai_api/
-  ├── src/
-  │   └── ai_api/
-  │       ├── data_structures/
-  │       │   ├── __init__.py      # Exports types and schemas
-  │       │   ├── LLM_types.py     # TypedDicts and dataclasses for API structures
-  │       │   └── db_responses_schema.py  # SQLAlchemy models for PostgreSQL
-  │       └── grok_client/
-  │           └── grok_client.py   # Asynchronous client implementation
-  ├── pyproject.toml               # Config for ruff, basedpyright, etc.
-  └── README.md                    # This file
-  ```
-
-- **Linting/Type-Checking**: Run `ruff check` and `basedpyright` from the root.
-- **Testing**: Add tests in a future `tests/` directory; currently, rely on examples in docstrings.
-
-## Full List of Exposed Functionality
-
-All elements can be imported from `ai_api.data_structures` or `ai_api.grok_client`.
-
-From `data_structures`:
-- Types: `OPEN_AI_*`, `SaveMode`, `GrokMessage`, `GrokRequest`, `GrokResponse`
-- Schema: `responses_default_settings`, `Providers`, `Requests`, `Responses`, `Logs`
-
-From `grok_client`:
-- `XAIAsyncClient`: Main client class with `submit_batch` method.
+ai_api/
+├── src/
+│   └── ai_api/
+│       ├── data_structures/
+│       │   ├── __init__.py
+│       │   ├── LLM_types_grok.py     # GrokMessage, GrokInput, GrokRequest, GrokResponse
+│       │   └── db_responses_schema.py
+│       └── grok_client/
+│           └── grok_client.py
+├── pyproject.toml
+└── README.md
+```
 
 ## Contributing
 
-Contributions are welcome! Follow the code style: Australian English, 88-column lines, full type hints (e.g., using `|` for unions), NumPy-style docstrings. Ensure compatibility with Python 3.12 and the `grok` environment. Use `infopypg` and `logger` for database and logging to avoid duplication.
+- Use Australian English
+- Line width ≤ 88 columns
+- Full type hints (`|` unions preferred)
+- NumPy-style docstrings
+- Functions ≤ 40 lines where practical
+- Prioritise: efficiency → clarity of ideas → readability
+
+Run `ruff check` and type checking before committing.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT. See [LICENSE](LICENSE).
 
----
-
-For questions or issues, contact the maintainer. Last updated: January 06, 2026.
+Last updated: January 2026
