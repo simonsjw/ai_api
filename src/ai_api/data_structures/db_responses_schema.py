@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# Active commands:
-
 """
 Script to define database schema models using SQLAlchemy.
 
@@ -46,7 +44,7 @@ Examples
 --------
 >>> from infopypg import DatabaseBuilder, resolve_postgres_connection_settings
 >>> resolved = resolve_postgres_connection_settings(default_settings=default_settings)
->>> builder = DatabaseBuilder(spec_path=__file__, resolved_settings=resolved)
+>>> builder = DatabaseBuilder(resolved_settings=resolved)
 >>> await builder.build()  # In async context; creates partitioned table (no sub-partitions)
 """
 
@@ -54,13 +52,11 @@ import asyncio
 import uuid
 from datetime import datetime
 from os import getenv
-from pathlib import Path
 from typing import Any
 
 from infopypg import (
     Base,
     DatabaseBuilder,
-    ResolvedSettingsDict,
 )
 from sqlalchemy import (
     BigInteger,
@@ -88,21 +84,9 @@ if raw_ext:
     extensions: list[str] = [ext.strip() for ext in raw_ext.split(",") if ext.strip()]
 else:
     extensions = [
-        "uuid-ossp",  # For potential UUIDs.
-        "pg_trgm",  # For text search if needed.
+        "uuid-ossp",                                                                      # For potential UUIDs.
+        "pg_trgm",                                                                        # For text search if needed.
     ]
-
-# Default settings with env overrides (lower-case keys for SettingsDict).
-responses_default_settings: ResolvedSettingsDict = {
-    "DB_USER": getenv("POSTGRES_DB_USER", "postgres"),
-    "DB_HOST": getenv("POSTGRES_DB_HOST", "127.0.0.1"),
-    "DB_PORT": getenv("POSTGRES_DB_PORT", "5432"),
-    "DB_NAME": "responses_db",
-    "PASSWORD": getenv("POSTGRES_U_POSTGRES_PW"),
-    "TABLESPACE_NAME": "responses_db",
-    "TABLESPACE_PATH": "/mnt/HDD03_HIT_03TB/no_backup/pg03/responses_db",
-    "EXTENSIONS": extensions,
-}
 
 
 class Providers(Base):
@@ -119,7 +103,7 @@ class Providers(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     description: Mapped[str | None] = mapped_column(
         Text, nullable=True
-    )  # Optional details.
+    )                                                                                     # Optional details.
 
     __table_args__: tuple[Index, dict[str, bool]] = (
         Index("ix_providers_name", "name"),
@@ -144,12 +128,12 @@ class Requests(Base):
 
     idx: Mapped[int] = mapped_column(
         BigInteger,
-        Identity(always=True),  # Per-partition autoincrement.
+        Identity(always=True),                                                            # Per-partition autoincrement.
         primary_key=True,
     )
     tstamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=func.now(), primary_key=True
-    )  # Partition key; part of PK.
+    )                                                                                     # Partition key; part of PK.
     provider_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("providers.id"), nullable=False
     )
@@ -165,10 +149,10 @@ class Requests(Base):
         Index("ix_requests_provider_id", "provider_id"),
         Index(
             "ix_requests_request_id", "request_id"
-        ),  # Added for faster lookups/joins on request_id
+        ),                                                                                # Added for faster lookups/joins on request_id
         UniqueConstraint(
             "request_id", "tstamp", name="uq_requests_request_id_tstamp"
-        ),  # Required for composite FK reference
+        ),                                                                                # Required for composite FK reference
         {"postgresql_partition_by": "RANGE (tstamp)", "extend_existing": True},
     )
 
@@ -191,12 +175,12 @@ class Responses(Base):
 
     idx: Mapped[int] = mapped_column(
         BigInteger,
-        Identity(always=True),  # Per-partition autoincrement.
+        Identity(always=True),                                                            # Per-partition autoincrement.
         primary_key=True,
     )
     tstamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=func.now(), primary_key=True
-    )  # Partition key; part of PK.
+    )                                                                                     # Partition key; part of PK.
     provider_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("providers.id"), nullable=False
     )
@@ -216,18 +200,18 @@ class Responses(Base):
         Index("ix_responses_provider_id", "provider_id"),
         Index(
             "ix_responses_request_id", "request_id"
-        ),  # Added for faster joins on request_id
+        ),                                                                                # Added for faster joins on request_id
         Index(
             "ix_responses_response_id", "response_id"
-        ),  # Added for faster lookups on response_id
+        ),                                                                                # Added for faster lookups on response_id
         Index(
             "ix_responses_request_id_tstamp", "request_id", "request_tstamp"
-        ),  # For composite FK efficiency
+        ),                                                                                # For composite FK efficiency
         ForeignKeyConstraint(
             columns=["request_id", "request_tstamp"],
             refcolumns=["requests.request_id", "requests.tstamp"],
             name="fk_responses_request_id_tstamp",
-            ondelete="CASCADE",  # CASCADE deletes response if request is deleted
+            ondelete="CASCADE",                                                           # CASCADE deletes response if request is deleted
         ),
         {"postgresql_partition_by": "RANGE (tstamp)", "extend_existing": True},
     )
@@ -249,12 +233,12 @@ class Logs(Base):
 
     idx: Mapped[int] = mapped_column(
         BigInteger,
-        Identity(always=True),  # Per-partition autoincrement.
+        Identity(always=True),                                                            # Per-partition autoincrement.
         primary_key=True,
     )
     tstamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=func.now(), primary_key=True
-    )  # Partition key; part of PK.
+    )                                                                                     # Partition key; part of PK.
     loglvl: Mapped[str] = mapped_column(Text, nullable=False)
     logger: Mapped[str] = mapped_column(Text, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
@@ -267,12 +251,21 @@ class Logs(Base):
 
 
 async def main() -> None:
-    # Path to spec.
-    spec_path: Path = Path(__file__)  # Use __file__ for current script.
-
     # Build (connects to 'postgres' for creation).
     builder: DatabaseBuilder = DatabaseBuilder(
-        spec_path=spec_path, resolved_settings=responses_default_settings
+        settings_dictionary={
+            "db_user": "postgres",
+            "db_host": "127.0.0.1",
+            "db_port": "5432",
+            "db_name": "responsesdb",
+            "password": getenv("POSTGRES_U_POSTGRES_PW"),
+            "tablespace_name": "responses_db",
+            "tablespace_path": "/mnt/HDD03_HIT_03TB/no_backup/pg03/responses_db",
+            "extensions": [
+                "uuid-ossp",                                                              # For potential UUIDs.
+                "postgres_fdw" "pg_trgm",                                                 # For text search if needed.
+            ],
+        }
     )
     await builder.build()
 
@@ -281,5 +274,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-#  LocalWords:  TABLESPACE tstamp postgresql
