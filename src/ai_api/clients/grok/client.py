@@ -311,7 +311,7 @@ class GrokConcreteClient(BaseAsyncProviderClient):
                     self.logger.error(f"Request save failed: {e}")
 
             payload = req.to_dict()
-
+            # self.logger.info(f"Requesting URL: {self.base_url}")
             for attempt in range(self.max_retries + 1):
                 try:
                     async with session.post(
