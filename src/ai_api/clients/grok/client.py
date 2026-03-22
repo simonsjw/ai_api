@@ -67,6 +67,7 @@ class GrokConcreteClient(BaseAsyncProviderClient):
         self,
         model: str,
         api_key: str,
+        base_url: str | None = None,
         save_mode: SaveMode = "none",
         output_dir: Path | None = None,
         pg_settings: dict[str, Any] | ResolvedSettingsDict | None = None,
@@ -81,6 +82,7 @@ class GrokConcreteClient(BaseAsyncProviderClient):
         """
         self.model = model
         self.api_key = api_key
+        self.base_url = base_url or self.base_url
         self.save_mode = save_mode
         self.output_dir = output_dir
         self.pg_settings = pg_settings
@@ -111,6 +113,7 @@ class GrokConcreteClient(BaseAsyncProviderClient):
         cls,
         model: str,
         api_key: str,
+        base_url: str | None = None,
         save_mode: SaveMode = "none",
         output_dir: Path | None = None,
         pg_settings: dict[str, Any] | ResolvedSettingsDict | None = None,
@@ -126,6 +129,7 @@ class GrokConcreteClient(BaseAsyncProviderClient):
         instance = cls(
             model=model,
             api_key=api_key,
+            base_url=base_url,
             save_mode=save_mode,
             output_dir=output_dir,
             pg_settings=pg_settings,

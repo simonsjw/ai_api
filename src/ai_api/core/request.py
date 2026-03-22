@@ -126,11 +126,18 @@ class LLMRequest:
                 "schema": self._serialise_schema(),
             }
 
-            # merge extensions (last-wins for any overlap)
+            # === Safe merging for provider_options and backend_options ===
         if self.provider_options:
-            base.update(self.provider_options)
+            if hasattr(self.provider_options, "to_dict"):
+                base.update(self.provider_options.to_dict())
+            else:
+                base.update(self.provider_options)
+
         if self.backend_options:
-            base.update(self.backend_options)
+            if hasattr(self.backend_options, "to_dict"):
+                base.update(self.backend_options.to_dict())
+            else:
+                base.update(self.backend_options)
 
         return {
             k: v for k, v in base.items() if v is not None

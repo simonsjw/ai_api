@@ -114,32 +114,38 @@ class LLMResponse:
         4. Store everything in .raw and .extra for full fidelity.
         """
         reasoning_content: str | None = None
+        output: str = ""
 
         if capture_reasoning:
             if provider == "grok":
-                # Grok reasoning lives in choices[0].message
                 msg = raw.get("choices", [{}])[0].get("message", {})
                 reasoning_content = msg.get("reasoning_content") or msg.get(
                     "reasoning", {}
                 ).get("encrypted_content")
                 if reasoning_content and "encrypted" in str(reasoning_content).lower():
-                    logger.warning("Grok-4 returned encrypted reasoning_content")
+                    print(
+                        "Grok-4 returned encrypted reasoning_content"
+                    )                                                                     # was logger.warning.
             else:                                                                         # Ollama
-                content = raw.get("message", {}).get("content", "") or raw.get(
-                    "response", ""
-                )
+                # Get full content (works for both native and OpenAI-compat)
+                content = raw.get("choices", [{}])[0].get("message", {}).get(
+                    "content", ""
+                ) or raw.get("response", "")
                 match = re.search(
                     r"<think>(.*?)</think>", content, re.DOTALL | re.IGNORECASE
                 )
                 if match:
                     reasoning_content = match.group(1).strip()
+                    # === STRIP reasoning from visible text (this was missing) ===
+                    output = content.replace(match.group(0), "").strip()
                 elif "reasoning_content" in raw:
                     reasoning_content = raw["reasoning_content"]
+                else:
+                    output = content
 
+                    # === GROK PATH (unchanged) ===
         if provider == "grok":
-            grok_resp: GrokResponse = GrokResponse.from_dict(
-                raw
-            )                                                                             # ← kept 100% unchanged
+            grok_resp = GrokResponse.from_dict(raw)
             return cls(
                 id=grok_resp.id,
                 created_at=grok_resp.created_at,
@@ -154,15 +160,26 @@ class LLMResponse:
                 reasoning_content=reasoning_content,
             )
 
-        # Ollama path (native or OpenAI-compat) — unchanged except for reasoning
-        output = raw.get("message", {}).get("content", "") or raw.get("response", "")
+        # === OLLAMA PATH (now strips reasoning when requested) ===
+        if not output:                                                                    # fallback if no stripping happened
+            choices = raw.get("choices", [])
+            if choices and isinstance(choices[0], dict):
+                output = choices[0].get("message", {}).get("content", "") or raw.get(
+                    "response", ""
+                )
+            else:
+                output = raw.get("response", "") or raw.get("message", {}).get(
+                    "content", ""
+                )
+
         return cls(
             id=raw.get("id", "ollama-unknown"),
             created_at=raw.get("created_at", 0),
             model=raw.get("model", "unknown"),
             provider=provider,
             text=output,
-            tool_calls=raw.get("message", {}).get("tool_calls", []),
+            tool_calls=raw.get("message", {}).get("tool_calls", [])
+            or raw.get("tool_calls", []),
             usage=raw.get("usage"),
             continuation_token=raw.get("context") or continuation_token,
             raw=raw,
@@ -171,7 +188,7 @@ class LLMResponse:
                 "load_duration": raw.get("load_duration"),
                 "eval_count": raw.get("eval_count"),
             },
-            reasoning_content=reasoning_content,                                          # ← NEW
+            reasoning_content=reasoning_content,
         )
 
 
