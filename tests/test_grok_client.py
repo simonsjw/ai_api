@@ -100,6 +100,7 @@ async def test_grok_streaming_with_reasoning(grok_client, mock_aiohttp):
         status=200,
         body=b'data: {"choices":[{"delta":{"content":"Final answer","reasoning_content":"Thinking step"}}]}\n\n'
         b'data: {"choices":[{"delta":{"content":"!"}}],"done":true}\n\n',
+        repeat=True,
     )
 
     req = LLMRequest(
@@ -109,10 +110,11 @@ async def test_grok_streaming_with_reasoning(grok_client, mock_aiohttp):
     )
     chunks = [chunk async for chunk in grok_client.stream(req)]
 
-    assert chunks[0].reasoning_delta == "Thinking step"
+    assert len(chunks) == 2
     assert chunks[0].delta_text == "Final answer"
+    assert chunks[0].reasoning_delta == "Thinking step"
     assert chunks[1].delta_text == "!"
-    assert chunks[-1].finished is True
+    assert chunks[1].finished is True
 
 
 @pytest.mark.asyncio

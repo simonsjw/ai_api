@@ -8,11 +8,23 @@ from aioresponses import aioresponses
 from ai_api import create
 
 
+@pytest_asyncio.fixture(scope="session")
+def event_loop():
+    """Explicit event loop for Python 3.12+ compatibility."""
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    loop.close()
+
+
 @pytest_asyncio.fixture
 async def mock_aiohttp():
-    """Mock all aiohttp calls."""
-    with aioresponses() as m:
+    """CORRECT aioresponses setup — blocks ALL real calls."""
+    m = aioresponses(passthrough=[])                                                      # ← empty list (this was the bug)
+    m.start()
+    try:
         yield m
+    finally:
+        m.stop()
 
 
 @pytest_asyncio.fixture
@@ -41,7 +53,7 @@ async def grok_client(mock_aiohttp):
                         concurrency=5,
                         max_retries=2,
                     )
-                    return client
+                    yield client
 
 
 @pytest_asyncio.fixture
