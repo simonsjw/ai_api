@@ -28,6 +28,7 @@ from typing import Any, cast
 from pydantic import BaseModel
 
 from ..data_structures.LLM_types_grok import GrokInput                                    # reuse existing validated input
+from ..data_structures.LLM_types_ollama import OllamaInput
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,7 @@ class LLMRequest:
     def to_dict(self) -> dict[str, Any]:
         """
         Convert request to minimal dictionary for API submission.
+        Supports both Grok (uses "input") and Ollama (uses "messages").
 
         Returns
         -------
@@ -109,16 +111,31 @@ class LLMRequest:
         3. Merge provider_options and backend_options.
         4. Filter None values (keeps payload tiny).
         """
-        base: dict[str, Any] = {                                                          # efficient single-pass dict
-            "input": self.input.to_list(),
-            "model": self.model,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "max_output_tokens": self.max_output_tokens,
-            "tools": self.tools,
-            "tool_choice": self.tool_choice,
-            "seed": self.seed,
-        }
+        conversation = self.input.to_list()
+
+        if isinstance(self.input, OllamaInput):
+            base: dict[str, Any] = {
+                "messages": conversation,
+                "model": self.model,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+                "max_output_tokens": self.max_output_tokens,
+                "tools": self.tools,
+                "tool_choice": self.tool_choice,
+                "seed": self.seed,
+            }
+        else:
+            # Grok behaviour
+            base: dict[str, Any] = {
+                "input": conversation,
+                "model": self.model,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+                "max_output_tokens": self.max_output_tokens,
+                "tools": self.tools,
+                "tool_choice": self.tool_choice,
+                "seed": self.seed,
+            }
 
         if self.structured_schema is not None:                                            # structured output support
             base["response_format"] = {
