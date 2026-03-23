@@ -30,10 +30,11 @@ dev = [
   "pytest-mock>=3.14.0",
 ]
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
 markers = [
+    "live: marks tests that hit real APIs (slow, costs money — Grok is remote, Ollama is local)",
     "integration: mark test as slow integration test",
 ]
+asyncio_mode = "auto"
 [build-system] # Build system configuration
 requires = ["setuptools>=61.0"]         # Requirements for building the package
 build-backend = "setuptools.build_meta" # Backend used for building
