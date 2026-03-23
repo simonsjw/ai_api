@@ -13,5 +13,7 @@ async def test_create_grok():
 
 @pytest.mark.asyncio
 async def test_create_ollama():
-    client = await create(provider="ollama", model="llama3.2", org="localhost")
+    client = await create(
+        provider="ollama", model="qwen3-coder-next:latest", org="localhost"
+    )
     assert client.provider_name == "ollama"
