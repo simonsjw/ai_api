@@ -259,6 +259,7 @@ class OllamaRequest:
     temperature: float | None = None
     top_p: float | None = None
     max_tokens: int | None = None
+    include_reasoning: bool = False                                                       # Opt-in for native thinking trace
 
     def to_payload(self) -> dict[str, Any]:
         """
@@ -279,7 +280,12 @@ class OllamaRequest:
             "top_p": self.top_p,
         }
         if self.max_tokens is not None:
-            result["options"] = {"num_predict": self.max_tokens}                          # Ollama option.
+            result["options"] = {"num_predict": self.max_tokens}
+
+        if self.include_reasoning:
+            # Ollama native 'think' parameter
+            # (true/false or "low"/"medium"/"high" for some models)
+            result["think"] = True
 
         return {k: v for k, v in result.items() if v is not None}                         # Omit None values.
 
@@ -319,6 +325,7 @@ class OllamaResponse:
     done: bool
     total_duration: int | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+    reasoning_text: str | None = None                                                     # Extracted native thinking trace
 
     @property
     def text(self) -> str:
@@ -353,6 +360,7 @@ class OllamaResponse:
             done=bool(data.get("done", False)),
             total_duration=data.get("total_duration"),
             raw=data.copy(),
+            reasoning_text=data.get("message", {}).get("thinking"),                       # New: native field
         )                                                                                 # Copy raw for debugging; direct field mapping.
 
 

@@ -311,6 +311,7 @@ class GrokRequest:
     tool_choice: str | dict[str, Any] | None = None
     parallel_tool_calls: bool | None = None
     structured_schema: dict[str, Any] | Type[BaseModel] | None = None
+    include_reasoning: bool = False                                                       #  opt-in for native reasoning trace
 
     def to_payload(self) -> dict[str, Any]:
         """
@@ -343,7 +344,17 @@ class GrokRequest:
             "parallel_tool_calls": self.parallel_tool_calls,
         }
 
-        if self.structured_schema is not None:                                            # Add response_format if present.
+        if self.include_reasoning:
+            # Grok Responses API native support (model-dependent)
+            if self.model.startswith("grok-4"):
+                # grok-4 family returns encrypted reasoning content
+                result["include"] = ["reasoning.encrypted_content"]
+            elif self.model.startswith("grok-3-mini"):
+                # grok-3-mini exposes reasoning_content directly (no extra param needed)
+                pass
+            # Other models ignore the flag gracefully
+
+        if self.structured_schema is not None:
             result["response_format"] = {
                 "type": "json_object",
                 "schema": self._serialize_schema(),
@@ -452,6 +463,7 @@ class GrokResponse:
     usage: dict[str, Any] | None = None
     status: Literal["completed", "in_progress", "incomplete"] | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+    reasoning_text: str | None = None                                                     # Extracted native reasoning trace
 
     @property
     def text(self) -> str:
@@ -538,6 +550,17 @@ class GrokResponse:
         if status not in ("completed", "in_progress", "incomplete", None):
             status = None
 
+        reasoning_text: str | None = None
+        if data.get("output"):
+            for item in data["output"]:
+                if item.get("type") == "message":
+                    # Direct reasoning_content (grok-3-mini)
+                    reasoning_text = item.get("reasoning_content")
+                    break
+                # Encrypted case for grok-4 (stored as-is; decryptable later via xAI SDK)
+                if isinstance(item.get("reasoning"), dict):
+                    reasoning_text = item.get("reasoning", {}).get("encrypted_content")
+
         return cls(
             id=response_id,
             created_at=created_at,
@@ -546,6 +569,7 @@ class GrokResponse:
             usage=usage,
             status=status,
             raw=raw,
+            reasoning_text=reasoning_text,
         )
 
     def __str__(self) -> str:
