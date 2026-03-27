@@ -12,8 +12,7 @@ class LLMStreamingChunkProtocol(Protocol):
     def is_final(self) -> bool: ...
     @property
     def raw(self) -> dict[str, Any]: ...
-
-type Role = Literal["system", "user", "assistant"]
+type Role = Literal['system', 'user', 'assistant']
 
 @dataclass(frozen=True)
 class OllamaMessage:

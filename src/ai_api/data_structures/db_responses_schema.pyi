@@ -1,13 +1,12 @@
 import uuid
 from datetime import datetime as datetime
-from infopypg import Base, ResolvedSettingsDict as ResolvedSettingsDict
+from infopypg import Base
 from sqlalchemy import ForeignKeyConstraint, Index, UniqueConstraint
-from sqlalchemy.orm import Mapped as Mapped
+from sqlalchemy.orm import Mapped
 from typing import Any
 
 raw_ext: str | None
 extensions: list[str]
-responses_default_settings: ResolvedSettingsDict
 
 class Providers(Base):
     __tablename__: str
