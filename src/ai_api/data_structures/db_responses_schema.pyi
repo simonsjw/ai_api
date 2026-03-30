@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime as datetime
 from infopypg import Base
 from sqlalchemy import ForeignKeyConstraint, Index, UniqueConstraint
-from sqlalchemy.orm import Mapped
+from sqlalchemy.orm import Mapped as Mapped
 from typing import Any
 
 raw_ext: str | None

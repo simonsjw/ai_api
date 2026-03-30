@@ -13,7 +13,8 @@ correctness. The classes for the request are layered as follows:
 - `GrokInput`: Wraps a sequence of `GrokMessage` instances, representing the
   full conversation input for an API request.
 - `GrokRequest`: Defines the full API request, including the `GrokInput`,
-  model parameters, tools, and optional structured output schemas.
+  model parameters, tools, and optional structured output schemas. Now includes
+  native reasoning trace support (`include_reasoning` + `reasoning_effort`).
 - `GrokBatchRequest`: High-level batch container for submitting multiple
   `GrokRequest` objects to Grok's /v1/batches endpoint.
 - `GrokBatchResponse`: Represents the asynchronous batch result returned by
@@ -27,7 +28,8 @@ Flow of request use (single or streaming):
    for deserialisation).
 2. Combine them into a `GrokInput` (or use `GrokInput.from_list` for
    deserialisation from a list of dicts).
-3. Pass the `GrokInput` to `GrokRequest` along with other parameters.
+3. Pass the `GrokInput` to `GrokRequest` along with other parameters
+   (including the new `include_reasoning` and `reasoning_effort` fields).
 4. Serialise the `GrokRequest` via `to_payload()` (automatically uses "input"
    for the Responses API) for API submission or streaming.
 
@@ -42,14 +44,17 @@ Flow of streaming (refined):
    LLMStreamingChunkProtocol for uniform consumption across providers.
 
 The GrokResponse object is used for interpreting a return from the Grok API
-(single or within a batch).
+(single or within a batch). It now extracts the native reasoning trace into
+`reasoning_text`.
 
 Examples
 --------
-Basic text request:
+Basic text request with reasoning:
     >>> messages = [{"role": "user", "content": "What is 101*3?"}]
     >>> grok_input = GrokInput.from_list(messages)
-    >>> request = GrokRequest(input=grok_input)
+    >>> request = GrokRequest(
+    ...     input=grok_input, include_reasoning=True, reasoning_effort="medium"
+    ... )
     >>> api_payload = request.to_payload()
 
 Batch of three requests:
@@ -271,14 +276,17 @@ class GrokRequest:
     immutability for thread-safety. Use to_payload() for serialisation
     (automatically uses "input" key for the Responses API).
 
+    New in this version: native reasoning trace support via `include_reasoning`
+    and `reasoning_effort`. The payload logic conditionally adds these fields
+    only for supported models (grok-3-mini family) to avoid SDK validation errors.
+
     Parameters
     ----------
     input : GrokInput
         The input messages (required; array of role/content dicts, supports
         multimodal content like images).
     model : str, optional
-        Model name (e.g., "grok-beta", "grok-4-0709"; no default in API, but
-        "grok-beta" used here for common cases).
+        Model name (e.g., "grok-3-mini", "grok-4.20-0309-reasoning").
     temperature : float | None, optional
         Sampling temperature (controls randomness; API default unspecified,
         typical range 0.0-2.0).
@@ -299,6 +307,10 @@ class GrokRequest:
     structured_schema : dict[str, Any] | Type[BaseModel] | None, optional
         JSON schema dict or Pydantic model for structured outputs. Serialised
         to 'response_format' as {"type": "json_object", "schema": ...}.
+    include_reasoning : bool, optional
+        Whether to request the native reasoning/thinking trace (default False).
+    reasoning_effort : Literal["low", "medium", "high"] | None, optional
+        Controls depth of reasoning trace where supported (grok-3-mini family).
     """
 
     input: GrokInput
@@ -311,7 +323,10 @@ class GrokRequest:
     tool_choice: str | dict[str, Any] | None = None
     parallel_tool_calls: bool | None = None
     structured_schema: dict[str, Any] | Type[BaseModel] | None = None
-    include_reasoning: bool = False                                                       #  opt-in for native reasoning trace
+    include_reasoning: bool = False                                                       # New: request the trace?
+    reasoning_effort: Literal["low", "medium", "high"] | None = (
+        None                                                                              # New: depth control where supported
+    )
 
     def to_payload(self) -> dict[str, Any]:
         """
@@ -321,6 +336,9 @@ class GrokRequest:
         Handles schema conversion for structured outputs and omits None values
         for efficiency. This method is used by the LLMClient for automatic
         payload inference.
+
+        reasoning_effort is forwarded via extra_body (the only way to pass
+        Grok-specific parameters through the openai SDK without TypeError).
 
         Returns
         -------
@@ -344,17 +362,20 @@ class GrokRequest:
             "parallel_tool_calls": self.parallel_tool_calls,
         }
 
+        # === Reasoning support (model-aware) ===
         if self.include_reasoning:
-            # Grok Responses API native support (model-dependent)
             if self.model.startswith("grok-4"):
-                # grok-4 family returns encrypted reasoning content
+                # Grok-4 family: request the encrypted reasoning trace
                 result["include"] = ["reasoning.encrypted_content"]
-            elif self.model.startswith("grok-3-mini"):
-                # grok-3-mini exposes reasoning_content directly (no extra param needed)
-                pass
-            # Other models ignore the flag gracefully
+                # grok-3-mini family: trace appears automatically; effort is applied below
 
-        if self.structured_schema is not None:
+        if self.reasoning_effort is not None:
+            # Only supported on grok-3-mini family; omitted elsewhere
+            if "grok-3-mini" in self.model.lower():
+                # Use extra_body to bypass openai SDK validation
+                result["extra_body"] = {"reasoning_effort": self.reasoning_effort}
+
+        if self.structured_schema is not None:                                            # Add response_format if present.
             result["response_format"] = {
                 "type": "json_object",
                 "schema": self._serialize_schema(),
@@ -454,6 +475,9 @@ class GrokBatchRequest:
 class GrokResponse:
     """
     Representation of a response from the xAI Grok Chat Completions API.
+
+    Now includes native `reasoning_text` extracted from the API response
+    (grok-3-mini: reasoning_content; grok-4: encrypted_content).
     """
 
     id: str
@@ -463,7 +487,7 @@ class GrokResponse:
     usage: dict[str, Any] | None = None
     status: Literal["completed", "in_progress", "incomplete"] | None = None
     raw: dict[str, Any] = field(default_factory=dict)
-    reasoning_text: str | None = None                                                     # Extracted native reasoning trace
+    reasoning_text: str | None = None                                                     # New: extracted native reasoning trace
 
     @property
     def text(self) -> str:
@@ -505,6 +529,7 @@ class GrokResponse:
         Create a GrokResponse instance from a raw API response dictionary.
 
         This is the recommended way to instantiate GrokResponse from real API data.
+        Also extracts the native reasoning trace into `reasoning_text`.
 
         Parameters
         ----------
@@ -550,16 +575,17 @@ class GrokResponse:
         if status not in ("completed", "in_progress", "incomplete", None):
             status = None
 
+            # === Extract reasoning trace (model-dependent) ===
         reasoning_text: str | None = None
-        if data.get("output"):
-            for item in data["output"]:
-                if item.get("type") == "message":
-                    # Direct reasoning_content (grok-3-mini)
-                    reasoning_text = item.get("reasoning_content")
-                    break
-                # Encrypted case for grok-4 (stored as-is; decryptable later via xAI SDK)
-                if isinstance(item.get("reasoning"), dict):
-                    reasoning_text = item.get("reasoning", {}).get("encrypted_content")
+        for item in data.get("output", []):
+            if item.get("type") == "message":
+                # grok-3-mini style
+                reasoning_text = item.get("reasoning_content")
+                break
+            # grok-4 encrypted style
+            if isinstance(item.get("reasoning"), dict):
+                reasoning_text = item.get("reasoning", {}).get("encrypted_content")
+                break
 
         return cls(
             id=response_id,

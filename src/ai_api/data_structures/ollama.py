@@ -252,6 +252,8 @@ class OllamaRequest:
         Nucleus sampling parameter.
     max_tokens : int | None, optional
         Maximum tokens in output (Ollama uses 'num_predict' internally).
+    include_reasoning : bool | False, optional
+        Capture reasoning artefacts from models where available.
     """
 
     input: OllamaInput
@@ -259,7 +261,10 @@ class OllamaRequest:
     temperature: float | None = None
     top_p: float | None = None
     max_tokens: int | None = None
-    include_reasoning: bool = False                                                       # Opt-in for native thinking trace
+    include_reasoning: bool = False                                                       # Request the trace?
+    reasoning_effort: Literal["low", "medium", "high"] | None = (
+        None                                                                              # Effort/level where supported
+    )
 
     def to_payload(self) -> dict[str, Any]:
         """
@@ -282,12 +287,15 @@ class OllamaRequest:
         if self.max_tokens is not None:
             result["options"] = {"num_predict": self.max_tokens}
 
-        if self.include_reasoning:
-            # Ollama native 'think' parameter
-            # (true/false or "low"/"medium"/"high" for some models)
-            result["think"] = True
+            # Native 'think' mapping – supports both capture and effort
+        if self.reasoning_effort is not None:
+            result["think"] = (
+                self.reasoning_effort
+            )                                                                             # str value for models that require it
+        elif self.include_reasoning:
+            result["think"] = True                                                        # bool for most models
 
-        return {k: v for k, v in result.items() if v is not None}                         # Omit None values.
+        return {k: v for k, v in result.items() if v is not None}
 
     def get_endpoint(self) -> str:
         """
