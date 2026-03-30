@@ -1,10 +1,10 @@
 import ollama
-from _typeshed import Incomplete as Incomplete
-from ai_api.data_structures.grok import GrokBatchRequest as GrokBatchRequest, GrokBatchResponse as GrokBatchResponse, GrokRequest as GrokRequest, GrokResponse as GrokResponse, LLMStreamingChunkProtocol as LLMStreamingChunkProtocol
-from ai_api.data_structures.ollama import OllamaRequest as OllamaRequest, OllamaResponse as OllamaResponse
+from _typeshed import Incomplete
+from ai_api.data_structures.grok import GrokBatchRequest, GrokBatchResponse, GrokRequest, GrokResponse, LLMStreamingChunkProtocol
+from ai_api.data_structures.ollama import OllamaRequest, OllamaResponse
 from infopypg import ResolvedSettingsDict as ResolvedSettingsDict
 from logging import Logger
-from openai import AsyncOpenAI as AsyncOpenAI
+from openai import AsyncOpenAI
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal
 
@@ -13,7 +13,7 @@ class LLMClient:
     model: Incomplete
     settings: Incomplete
     conversation_id: Incomplete
-    logger: Logger
+    logger: Logger | None
     resolved_settings: ResolvedSettingsDict | None
     client: AsyncOpenAI | ollama.AsyncClient | None
     def __init__(self, provider: Literal['grok', 'ollama'], model: str, settings: dict[str, Any], api_key: str | None = None, conversation_id: str | None = None, logger: Logger | None = None) -> None: ...

@@ -92,9 +92,9 @@ creation, minimal allocations in hot paths, semaphore throttling).
 from __future__ import annotations
 
 import asyncio
-import json
+import uuid
+from datetime import datetime, timezone
 from logging import Logger
-from os import getenv
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal
 
@@ -162,8 +162,7 @@ class LLMClient:
         self.conversation_id = conversation_id
 
         # Logger integrates with infopypg and writes to the existing logs table
-        if logger:
-            self.logger: Logger = logger
+        self.logger: Logger | None = logger
 
         self.resolved_settings: ResolvedSettingsDict | None = None
         self.client: AsyncOpenAI | ollama.AsyncClient | None = None
@@ -171,7 +170,7 @@ class LLMClient:
         if provider == "grok":
             if not api_key:
                 msg = "api_key required for Grok provider"
-                if self.logger:
+                if self.logger is not None:
                     self.logger.error(msg)
                 raise ValueError(msg)
             self.client = AsyncOpenAI(
@@ -182,102 +181,115 @@ class LLMClient:
             self.client = ollama.AsyncClient(host="http://127.0.0.1:11434")
         else:
             msg: str = f"Unsupported provider: {provider}"
-            if self.logger:
+            if self.logger is not None:
                 self.logger.error(msg)
             raise ValueError(msg)
 
-        if self.logger:
+        if self.logger is not None:
             self.logger.debug(
                 "LLMClient initialised",
                 extra={"obj": {"provider": provider, "model": model}},
             )
 
     async def _ensure_db_pool(self) -> None:
-        """Lazily resolve settings and obtain infopypg connection pool."""
+        """Lazily resolve settings and obtain the connection pool from PgPoolManager.
+
+        Uses infopypg.async_dict_to_ResolvedSettingsDict and
+        PgPoolManager.get_pool with optional logger.
+        """
         if self.resolved_settings is None:
             self.resolved_settings = await async_dict_to_ResolvedSettingsDict(
-                self.settings
+                self.settings, logger=self.logger
+            )
+            self.pool = await PgPoolManager.get_pool(
+                self.resolved_settings, logger=self.logger
             )
 
     async def _persist_interaction(
         self, request_obj: GrokRequest | OllamaRequest, response_obj: Any
     ) -> None:
-        """Write full request and response to PostgreSQL using the schema.
+        """Write full request and response to PostgreSQL using infopypg.
 
-        Inserts one row into the Requests table and one row into the Responses
-        table (both partitioned by tstamp). Uses infopypg.execute_query with
-        parameterized INSERT for safety and efficiency. Falls back gracefully
-        on DB errors (logs warning).
-
-        Parameters
-        ----------
-        request_obj
-            GrokRequest or OllamaRequest instance.
-        response_obj
-            GrokResponse, OllamaResponse, or final streaming state dict.
+        Generates real UUIDs and current UTC timestamp. Falls back gracefully
+        on any DB error (logs warning only). Uses cached pool.
         """
         await self._ensure_db_pool()
-        pool = await PgPoolManager.get_pool(self.resolved_settings)                       # type: ignore[arg-type]
+        if self.pool is None:
+            return                                                                        # graceful early exit if pool unavailable
 
-        # Structured log
-        if self.logger:
-            self.logger.info(
-                "LLM interaction completed",
-                extra={
-                    "obj": {
-                        "provider": self.provider,
-                        "model": self.model,
-                        "request_id": getattr(request_obj, "id", None),
-                    }
-                },
+        try:
+            request_id = str(uuid.uuid4())
+            response_id = str(uuid.uuid4())
+            now = datetime.now(timezone.utc)
+            request_tstamp = now.isoformat()
+
+            # Request row – explicit order matches table columns
+            request_params = [
+                1,                                                                        # provider_id (TODO: resolve from Providers table if required)
+                request_obj.get_endpoint(),
+                request_id,
+                request_obj.to_payload(),
+                {"conversation_id": self.conversation_id},
+            ]
+
+            await execute_query(
+                self.pool,
+                """
+                INSERT INTO requests (provider_id, endpoint, request_id, request, meta)
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                params=request_params,
+                fetch=False,
+                logger=self.logger,
             )
 
-            # Build minimal insert dicts for the two tables (JSONB fields)
-        request_payload = {
-            "provider_id": 1,                                                             # TODO: resolve from Providers lookup if needed
-            "endpoint": request_obj.get_endpoint(),
-            "request_id": "00000000-0000-0000-0000-000000000000",                         # placeholder
-            "request": request_obj.to_payload(),
-            "meta": {"conversation_id": self.conversation_id},
-        }
-        response_payload = {
-            "provider_id": 1,
-            "endpoint": request_obj.get_endpoint(),
-            "request_id": "00000000-0000-0000-0000-000000000000",
-            "request_tstamp": "2025-03-26 19:22:00+00",                                   # placeholder
-            "response_id": "00000000-0000-0000-0000-000000000000",
-            "response": (
-                response_obj.to_dict()
-                if hasattr(response_obj, "to_dict")
-                else response_obj
-            ),
-            "meta": {"conversation_id": self.conversation_id},
-        }
+            # Response row
+            response_params = [
+                1,
+                request_obj.get_endpoint(),
+                request_id,
+                request_tstamp,
+                response_id,
+                (
+                    response_obj.to_dict()
+                    if hasattr(response_obj, "to_dict")
+                    else response_obj
+                ),
+                {"conversation_id": self.conversation_id},
+            ]
 
-        # Insert request row
-        await execute_query(
-            pool,
-            """
-            INSERT INTO requests (provider_id, endpoint, request_id, request, meta)
-            VALUES ($1, $2, $3, $4, $5)
-            """,
-            params=list(request_payload.values()),
-            fetch=False,
-            logger=self.logger,
-        )
+            await execute_query(
+                self.pool,
+                """
+                INSERT INTO responses (provider_id, endpoint, request_id, request_tstamp,
+                                       response_id, response, meta)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                params=response_params,
+                fetch=False,
+                logger=self.logger,
+            )
 
-        # Insert response row
-        await execute_query(
-            pool,
-            """
-            INSERT INTO responses (provider_id, endpoint, request_id, request_tstamp,
-                                   response_id, response, meta)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            """,
-            params=list(response_payload.values()),
-            fetch=False,
-            logger=self.logger,
-        )
+            if self.logger is not None:
+                self.logger.info(
+                    "LLM interaction persisted",
+                    extra={
+                        "obj": {
+                            "provider": self.provider,
+                            "model": self.model,
+                            "request_id": request_id,
+                        }
+                    },
+                )
+
+        except Exception as exc:                                                          # noqa: BLE001
+            if self.logger is not None:
+                self.logger.warning(
+                    "DB persistence failed – continuing without error",
+                    extra={"obj": {"error": str(exc)}},
+                    exc_info=True,
+                )
+                # graceful fallback; LLM call is not interrupted
 
     async def generate(
         self,
@@ -435,11 +447,11 @@ class LLMClient:
         """
         if self.provider == "grok" and not self.conversation_id:
             msg = "parallel_generate on Grok requires conversation_id for caching"
-            if self.logger:
+            if self.logger is not None:
                 self.logger.error(msg)
             raise ValueError(msg)
 
-        if self.logger:
+        if self.logger is not None:
             self.logger.info(
                 "parallel_generate started",
                 extra={
@@ -458,7 +470,7 @@ class LLMClient:
         tasks = [_safe_generate(req) for req in requests]
         results = await asyncio.gather(*tasks)                                            # exceptions raised immediately
 
-        if self.logger:
+        if self.logger is not None:
             self.logger.info(
                 "parallel_generate completed",
                 extra={"obj": {"count": len(results)}},
@@ -488,7 +500,7 @@ class LLMClient:
         if self.provider != "grok":
             msg = "submit_batch is only available for Grok provider"
             raise ValueError(msg)
-        if self.logger:
+        if self.logger is not None:
             self.logger.info(
                 "submit_batch started",
                 extra={"obj": {"batch_size": len(batch_request.requests)}},
@@ -501,7 +513,7 @@ class LLMClient:
             )
             batch_response = GrokBatchResponse.from_dict(response.json())
         except Exception as exc:                                                          # noqa: BLE001
-            if self.logger:
+            if self.logger is not None:
                 self.logger.error(
                     "submit_batch failed",
                     extra={"obj": {"error": str(exc)}},
@@ -510,7 +522,7 @@ class LLMClient:
 
             raise
 
-        if self.logger:
+        if self.logger is not None:
             self.logger.info(
                 "submit_batch completed",
                 extra={"obj": {"batch_id": batch_response.batch_id}},
@@ -556,7 +568,7 @@ class LLMClient:
                 asyncio.get_event_loop().time() - start_time > timeout_seconds
             ):
                 msg = f"Batch {batch_id} timed out after {timeout_seconds}s"
-                if self.logger:
+                if self.logger is not None:
                     self.logger.error(msg)
                 raise TimeoutError(msg)
 
@@ -564,7 +576,7 @@ class LLMClient:
             status = resp.json()
 
             if status.get("status") == "completed":
-                if self.logger:
+                if self.logger is not None:
                     self.logger.info(
                         "batch completed",
                         extra={"obj": {"batch_id": batch_id}},
@@ -586,7 +598,7 @@ class LLMClient:
         if self.provider != "ollama":
             msg = "create_ollama_model is only available for Ollama provider"
 
-            if self.logger:
+            if self.logger is not None:
                 self.logger.error(msg)
             raise ValueError(msg)
 
@@ -601,7 +613,7 @@ class LLMClient:
         """Return embeddings (most useful with Ollama; Grok does not expose this)."""
         if self.provider != "ollama":
             msg = "get_embeddings currently only implemented for Ollama"
-            if self.logger:
+            if self.logger is not None:
                 self.logger.error(msg)
             raise ValueError(msg)
         result = await self.client.embeddings(                                            # type: ignore[union-attr]
