@@ -25,10 +25,10 @@ Key responsibilities:
 
 Public API
 ----------
-__init__(provider, model, settings, api_key=None, conversation_id=None)
-    Initialises the client, sets up the logger, and creates the underlying
+__init__(provider, model, settings, api_key=None, conversation_id=None, logger=None)
+    Initialises the client, uses optional initialised logger, and creates the underlying
     provider client (AsyncOpenAI for Grok or ollama.AsyncClient for Ollama).
-    Depends on: logger.setup_logger(), infopypg.async_dict_to_ResolvedSettingsDict.
+    Depends on: logger.Logger, infopypg.async_dict_to_ResolvedSettingsDict.
 
 generate(request, stream=False, use_cache=True, **kwargs)
     Main entry point. Dispatches to the appropriate private generator based on
@@ -80,7 +80,7 @@ Dependencies
 ------------
 - ai_api.data_structures.grok / ollama (request/response/streaming classes)
 - infopypg (PgPoolManager, async_dict_to_ResolvedSettingsDict, execute_query)
-- logger (setup_logger)
+- logger (Logger)
 - openai.AsyncOpenAI (for Grok Responses API)
 - ollama (for local inference)
 - asyncio (for parallel and streaming operations)
@@ -92,6 +92,9 @@ creation, minimal allocations in hot paths, semaphore throttling).
 from __future__ import annotations
 
 import asyncio
+import json
+from logging import Logger
+from os import getenv
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal
 
@@ -102,7 +105,6 @@ from infopypg import (
     async_dict_to_ResolvedSettingsDict,
     execute_query,
 )
-from logger import setup_logger
 from openai import AsyncOpenAI
 
 from ai_api.data_structures.grok import (
@@ -134,6 +136,7 @@ class LLMClient:
         settings: dict[str, Any],
         api_key: str | None = None,
         conversation_id: str | None = None,
+        logger: Logger | None = None,
     ) -> None:
         """Initialise the LLMClient.
 
@@ -159,11 +162,8 @@ class LLMClient:
         self.conversation_id = conversation_id
 
         # Logger integrates with infopypg and writes to the existing logs table
-        self.logger = setup_logger(
-            logger_name=f"llm.{provider}",
-            log_location=settings,
-            log_level=20,                                                                 # INFO
-        )
+        if logger:
+            self.logger: Logger = logger
 
         self.resolved_settings: ResolvedSettingsDict | None = None
         self.client: AsyncOpenAI | ollama.AsyncClient | None = None
@@ -171,6 +171,8 @@ class LLMClient:
         if provider == "grok":
             if not api_key:
                 msg = "api_key required for Grok provider"
+                if self.logger:
+                    self.logger.error(msg)
                 raise ValueError(msg)
             self.client = AsyncOpenAI(
                 api_key=api_key,
@@ -179,13 +181,16 @@ class LLMClient:
         elif provider == "ollama":
             self.client = ollama.AsyncClient(host="http://127.0.0.1:11434")
         else:
-            msg = f"Unsupported provider: {provider}"
+            msg: str = f"Unsupported provider: {provider}"
+            if self.logger:
+                self.logger.error(msg)
             raise ValueError(msg)
 
-        self.logger.debug(
-            "LLMClient initialised",
-            extra={"obj": {"provider": provider, "model": model}},
-        )
+        if self.logger:
+            self.logger.debug(
+                "LLMClient initialised",
+                extra={"obj": {"provider": provider, "model": model}},
+            )
 
     async def _ensure_db_pool(self) -> None:
         """Lazily resolve settings and obtain infopypg connection pool."""
@@ -214,19 +219,20 @@ class LLMClient:
         await self._ensure_db_pool()
         pool = await PgPoolManager.get_pool(self.resolved_settings)                       # type: ignore[arg-type]
 
-        # Structured log (writes to logs table automatically)
-        self.logger.info(
-            "LLM interaction completed",
-            extra={
-                "obj": {
-                    "provider": self.provider,
-                    "model": self.model,
-                    "request_id": getattr(request_obj, "id", None),
-                }
-            },
-        )
+        # Structured log
+        if self.logger:
+            self.logger.info(
+                "LLM interaction completed",
+                extra={
+                    "obj": {
+                        "provider": self.provider,
+                        "model": self.model,
+                        "request_id": getattr(request_obj, "id", None),
+                    }
+                },
+            )
 
-        # Build minimal insert dicts for the two tables (JSONB fields)
+            # Build minimal insert dicts for the two tables (JSONB fields)
         request_payload = {
             "provider_id": 1,                                                             # TODO: resolve from Providers lookup if needed
             "endpoint": request_obj.get_endpoint(),
@@ -257,6 +263,7 @@ class LLMClient:
             """,
             params=list(request_payload.values()),
             fetch=False,
+            logger=self.logger,
         )
 
         # Insert response row
@@ -269,6 +276,7 @@ class LLMClient:
             """,
             params=list(response_payload.values()),
             fetch=False,
+            logger=self.logger,
         )
 
     async def generate(
@@ -427,12 +435,17 @@ class LLMClient:
         """
         if self.provider == "grok" and not self.conversation_id:
             msg = "parallel_generate on Grok requires conversation_id for caching"
+            if self.logger:
+                self.logger.error(msg)
             raise ValueError(msg)
 
-        self.logger.info(
-            "parallel_generate started",
-            extra={"obj": {"count": len(requests), "max_concurrent": max_concurrent}},
-        )
+        if self.logger:
+            self.logger.info(
+                "parallel_generate started",
+                extra={
+                    "obj": {"count": len(requests), "max_concurrent": max_concurrent}
+                },
+            )
 
         semaphore = asyncio.Semaphore(max_concurrent)
 
@@ -445,10 +458,11 @@ class LLMClient:
         tasks = [_safe_generate(req) for req in requests]
         results = await asyncio.gather(*tasks)                                            # exceptions raised immediately
 
-        self.logger.info(
-            "parallel_generate completed",
-            extra={"obj": {"count": len(results)}},
-        )
+        if self.logger:
+            self.logger.info(
+                "parallel_generate completed",
+                extra={"obj": {"count": len(results)}},
+            )
         return results
 
     async def submit_batch(
@@ -474,11 +488,11 @@ class LLMClient:
         if self.provider != "grok":
             msg = "submit_batch is only available for Grok provider"
             raise ValueError(msg)
-
-        self.logger.info(
-            "submit_batch started",
-            extra={"obj": {"batch_size": len(batch_request.requests)}},
-        )
+        if self.logger:
+            self.logger.info(
+                "submit_batch started",
+                extra={"obj": {"batch_size": len(batch_request.requests)}},
+            )
 
         payload = batch_request.to_payload()
         try:
@@ -487,17 +501,20 @@ class LLMClient:
             )
             batch_response = GrokBatchResponse.from_dict(response.json())
         except Exception as exc:                                                          # noqa: BLE001
-            self.logger.error(
-                "submit_batch failed",
-                extra={"obj": {"error": str(exc)}},
-                exc_info=True,
-            )
+            if self.logger:
+                self.logger.error(
+                    "submit_batch failed",
+                    extra={"obj": {"error": str(exc)}},
+                    exc_info=True,
+                )
+
             raise
 
-        self.logger.info(
-            "submit_batch completed",
-            extra={"obj": {"batch_id": batch_response.batch_id}},
-        )
+        if self.logger:
+            self.logger.info(
+                "submit_batch completed",
+                extra={"obj": {"batch_id": batch_response.batch_id}},
+            )
 
         if persist:
             # Reuse existing persistence path (stores batch as a request)
@@ -539,17 +556,20 @@ class LLMClient:
                 asyncio.get_event_loop().time() - start_time > timeout_seconds
             ):
                 msg = f"Batch {batch_id} timed out after {timeout_seconds}s"
+                if self.logger:
+                    self.logger.error(msg)
                 raise TimeoutError(msg)
 
             resp = await self.client.get(f"/v1/batches/{batch_id}")                       # type: ignore[union-attr]
             status = resp.json()
 
             if status.get("status") == "completed":
-                self.logger.info(
-                    "batch completed",
-                    extra={"obj": {"batch_id": batch_id}},
-                )
-                # Extract individual results
+                if self.logger:
+                    self.logger.info(
+                        "batch completed",
+                        extra={"obj": {"batch_id": batch_id}},
+                    )
+                    # Extract individual results
                 results = []
                 for item in status.get("results", []):
                     if item.get("response"):
@@ -565,7 +585,11 @@ class LLMClient:
         """
         if self.provider != "ollama":
             msg = "create_ollama_model is only available for Ollama provider"
+
+            if self.logger:
+                self.logger.error(msg)
             raise ValueError(msg)
+
         return await self.client.create(                                                  # type: ignore[union-attr]
             model=self.model,
             modelfile=str(modelfile),
@@ -577,6 +601,8 @@ class LLMClient:
         """Return embeddings (most useful with Ollama; Grok does not expose this)."""
         if self.provider != "ollama":
             msg = "get_embeddings currently only implemented for Ollama"
+            if self.logger:
+                self.logger.error(msg)
             raise ValueError(msg)
         result = await self.client.embeddings(                                            # type: ignore[union-attr]
             model=self.model,
