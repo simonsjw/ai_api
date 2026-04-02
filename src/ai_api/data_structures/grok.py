@@ -351,7 +351,9 @@ class GrokRequest:
             If structured_schema invalid.
         """
         result: dict[str, Any] = {                                                        # Base dict; efficient init.
-            "input": self.input.to_list(),
+            "input": self.input
+            if isinstance(self.input, str)
+            else self.input.to_list(),
             "model": self.model,
             "temperature": self.temperature,
             "top_p": self.top_p,
