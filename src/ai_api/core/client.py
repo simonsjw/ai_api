@@ -457,7 +457,17 @@ class LLMClient:
         # validation is synchronous – no await required
         self._validate_think_option(request.model, think_value)                           # line ~447 fixed
 
-        return await self._perform_ollama_chat(request, options, stream, **kwargs)
+        if stream:
+            raw_stream = self.client.chat(                                                # type: ignore[union-attr]
+                model=request.model,
+                messages=request.messages,
+                options=options,
+                stream=stream,
+                **kwargs,
+            )
+            return self._ollama_stream(raw_stream)
+        else:
+            return await self._perform_ollama_chat(request, options, stream, **kwargs)
 
     def _validate_think_option(self, model: str, think_value: Any | None) -> None:
         """Validate the 'think' option before any network call.
