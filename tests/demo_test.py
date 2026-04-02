@@ -56,40 +56,11 @@ def mock_grok_client() -> MagicMock:
 
 
 @pytest.fixture
-def ollama_client(
-    mock_settings: dict[str, Any], mock_ollama_client: MagicMock
-) -> LLMClient:
-    """Return an LLMClient configured for Ollama with mocked backend."""
-    with patch("ollama.AsyncClient", return_value=mock_ollama_client):
-        return LLMClient(
-            provider="ollama",
-            model="qwen3:8b",
-            settings=mock_settings,
-        )
-
-
-@pytest.fixture
-def grok_client(
-    mock_settings: dict[str, Any], mock_grok_client: MagicMock
-) -> LLMClient:
-    """Return an LLMClient configured for Grok with mocked backend."""
-    with patch("openai.AsyncOpenAI", return_value=mock_grok_client):
-        return LLMClient(
-            provider="grok",
-            model="grok-3",
-            settings=mock_settings,
-            api_key="dummy-key-for-testing",
-            conversation_id="test-conversation-id",
-        )
-
-
-@pytest.fixture
 def ollama_request() -> OllamaRequest:
-    """Minimal OllamaRequest for testing."""
+    """Minimal OllamaRequest (updated for latest constructor – no 'messages')."""
     return OllamaRequest(
         model="qwen3:8b",
         input="Hello",
-        messages=[{"role": "user", "content": "Hello"}],
         options={},
     )
 
@@ -123,15 +94,15 @@ async def test_ollama_generate_stream(
     ollama_request: OllamaRequest,
     mock_ollama_client: MagicMock,
 ) -> None:
-    """Verify streaming Ollama generate (current implementation returns iterator directly)."""
+    """Verify streaming Ollama generate yields chunks implementing the protocol."""
 
     async def fake_stream() -> AsyncIterator[dict[str, Any]]:
         yield {"message": {"content": "chunk1"}}
         yield {"message": {"content": "chunk2"}}
 
     mock_ollama_client.chat.return_value = fake_stream()
-    chunks: list[Any] = []
     result = await ollama_client.generate(ollama_request, stream=True)
+    chunks: list[Any] = []
     async for chunk in result:
         chunks.append(chunk)
     assert len(chunks) == 2
@@ -181,7 +152,7 @@ async def test_ollama_think_none_does_not_raise(
 async def test_grok_generate(
     grok_client: LLMClient, grok_request: GrokRequest, mock_grok_client: MagicMock
 ) -> None:
-    """Verify Grok provider path works end-to-end."""
+    """Verify Grok provider path works end-to-end (requires the to_payload fix above)."""
     mock_grok_client.responses.create.return_value = MagicMock(
         model_dump=lambda: {"output": "Grok answer"}
     )
