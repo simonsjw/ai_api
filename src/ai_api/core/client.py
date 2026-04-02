@@ -386,28 +386,22 @@ class LLMClient:
     ) -> OllamaResponse | AsyncIterator[OllamaStreamingChunk]:
         """Ollama-specific generation path.
 
-        Parameters
-        ----------
-        request
-            OllamaRequest instance (union accepted for call-site compatibility).
-        stream
-            Return streaming iterator if True.
-        **kwargs
-            Extra parameters passed through.
+        Merges payload safely to prevent duplicate keyword arguments
+        ('model', 'stream', 'messages', etc.) when calling ollama.AsyncClient.chat().
         """
+        payload: dict[str, Any] = dict(request.to_payload())                              # explicit copy
+        payload["model"] = self.model
+        payload["stream"] = stream
+
         if stream:
             ollama_stream = await self.client.chat(                                       # type: ignore[union-attr]
-                model=self.model,
-                **request.to_payload(),                                                   # includes "messages" automatically
-                stream=True,
+                **payload,
                 **kwargs,
             )
             return self._ollama_stream(ollama_stream)
 
         response_raw = await self.client.chat(                                            # type: ignore[union-attr]
-            model=self.model,
-            **request.to_payload(),
-            stream=False,
+            **payload,
             **kwargs,
         )
         response = OllamaResponse.from_dict(response_raw)
