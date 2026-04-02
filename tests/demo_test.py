@@ -56,6 +56,34 @@ def mock_grok_client() -> MagicMock:
 
 
 @pytest.fixture
+def ollama_client(
+    mock_settings: dict[str, Any], mock_ollama_client: MagicMock
+) -> LLMClient:
+    """Return an LLMClient configured for Ollama with mocked backend."""
+    with patch("ollama.AsyncClient", return_value=mock_ollama_client):
+        return LLMClient(
+            provider="ollama",
+            model="qwen3:8b",
+            settings=mock_settings,
+        )
+
+
+@pytest.fixture
+def grok_client(
+    mock_settings: dict[str, Any], mock_grok_client: MagicMock
+) -> LLMClient:
+    """Return an LLMClient configured for Grok with mocked backend."""
+    with patch("openai.AsyncOpenAI", return_value=mock_grok_client):
+        return LLMClient(
+            provider="grok",
+            model="grok-3",
+            settings=mock_settings,
+            api_key="dummy-key-for-testing",
+            conversation_id="test-conversation-id",
+        )
+
+
+@pytest.fixture
 def ollama_request() -> OllamaRequest:
     """Minimal OllamaRequest (updated for latest constructor – no 'messages')."""
     return OllamaRequest(
@@ -152,7 +180,7 @@ async def test_ollama_think_none_does_not_raise(
 async def test_grok_generate(
     grok_client: LLMClient, grok_request: GrokRequest, mock_grok_client: MagicMock
 ) -> None:
-    """Verify Grok provider path works end-to-end (requires the to_payload fix above)."""
+    """Verify Grok provider path works end-to-end."""
     mock_grok_client.responses.create.return_value = MagicMock(
         model_dump=lambda: {"output": "Grok answer"}
     )
