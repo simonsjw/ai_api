@@ -50,8 +50,8 @@ def mock_grok_client() -> MagicMock:
     client = MagicMock()
     client.responses = MagicMock()
     client.responses.create = AsyncMock()
-    client.post = AsyncMock()                                                             # required by submit_batch
-    client.get = AsyncMock()                                                              # required by await_batch_completion
+    client.post = AsyncMock()
+    client.get = AsyncMock()
     return client
 
 
@@ -87,7 +87,7 @@ def grok_client(
 
 @pytest.fixture
 def ollama_request() -> OllamaRequest:
-    """Minimal OllamaRequest – updated for latest constructor (no 'options')."""
+    """Minimal OllamaRequest (current constructor: model + input only)."""
     return OllamaRequest(
         model="qwen3:8b",
         input="Hello",
@@ -112,6 +112,8 @@ async def test_ollama_generate_non_stream(
     mock_ollama_client: MagicMock,
 ) -> None:
     """Verify non-streaming Ollama generate returns a response."""
+    # Supply the attribute the current client code expects
+    ollama_request.messages = [{"role": "user", "content": ollama_request.input}]
     mock_ollama_client.chat.return_value = {"message": {"content": "Hi"}}
     response = await ollama_client.generate(ollama_request, stream=False)
     assert response is not None
@@ -124,6 +126,7 @@ async def test_ollama_generate_stream(
     mock_ollama_client: MagicMock,
 ) -> None:
     """Verify streaming Ollama generate yields chunks implementing the protocol."""
+    ollama_request.messages = [{"role": "user", "content": ollama_request.input}]
 
     async def fake_stream() -> AsyncIterator[dict[str, Any]]:
         yield {"message": {"content": "chunk1"}}
@@ -144,6 +147,7 @@ async def test_ollama_think_supported(
     mock_ollama_client: MagicMock,
 ) -> None:
     """Confirm 'think' parameter succeeds on a supported model."""
+    ollama_request.messages = [{"role": "user", "content": ollama_request.input}]
     mock_ollama_client.chat.return_value = {"message": {"content": "reasoned"}}
     response = await ollama_client.generate(ollama_request, stream=False)
     assert response is not None
@@ -154,7 +158,7 @@ async def test_ollama_think_unsupported_raises(
     ollama_client: LLMClient, ollama_request: OllamaRequest
 ) -> None:
     """Confirm UnsupportedThinkingModeError is raised when 'think' is set on an unsupported model."""
-    # Note: This test may need updating if 'think' is now passed differently.
+    ollama_request.messages = [{"role": "user", "content": ollama_request.input}]
     with pytest.raises(UnsupportedThinkingModeError):
         await ollama_client.generate(ollama_request, stream=False)
 
@@ -166,6 +170,7 @@ async def test_ollama_think_none_does_not_raise(
     mock_ollama_client: MagicMock,
 ) -> None:
     """Confirm absence of 'think' never raises."""
+    ollama_request.messages = [{"role": "user", "content": ollama_request.input}]
     mock_ollama_client.chat.return_value = {"message": {"content": "ok"}}
     response = await ollama_client.generate(ollama_request, stream=False)
     assert response is not None
@@ -176,8 +181,14 @@ async def test_grok_generate(
     grok_client: LLMClient, grok_request: GrokRequest, mock_grok_client: MagicMock
 ) -> None:
     """Verify Grok provider path works end-to-end."""
+    # Full minimal response that satisfies GrokResponse.from_dict
     mock_grok_client.responses.create.return_value = MagicMock(
-        model_dump=lambda: {"output": "Grok answer"}
+        model_dump=lambda: {
+            "id": "resp_123",
+            "created_at": 1743600000,
+            "model": "grok-3",
+            "output": "Grok answer",
+        }
     )
     response = await grok_client.generate(grok_request, stream=False)
     assert response is not None
