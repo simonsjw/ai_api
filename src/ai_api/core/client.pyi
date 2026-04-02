@@ -1,10 +1,10 @@
 import ollama
-from _typeshed import Incomplete
+from _typeshed import Incomplete as Incomplete
 from ai_api.data_structures.grok import GrokBatchRequest, GrokBatchResponse, GrokRequest, GrokResponse, LLMStreamingChunkProtocol
 from ai_api.data_structures.ollama import OllamaRequest, OllamaResponse
 from infopypg import ResolvedSettingsDict as ResolvedSettingsDict
 from logging import Logger
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI as AsyncOpenAI
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal
 

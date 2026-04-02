@@ -16,6 +16,9 @@ Key responsibilities:
   LLMStreamingChunkProtocol for uniform consumption across providers.
 - Supports Grok-native prompt caching (via `conversation_id`), tools, vision,
   parallel generation, and native /v1/batches.
+- Supports the 'think' parameter for Ollama with strict opt-in validation
+  (raises UnsupportedThinkingModeError when explicitly set on unsupported
+  models).
 - Automatically persists every request/response pair to PostgreSQL using
   infopypg (inserts into the partitioned `requests` and `responses` tables).
 - Performs structured logging via the custom `logger` module (writes to the
@@ -26,14 +29,18 @@ Key responsibilities:
 Public API
 ----------
 __init__(provider, model, settings, api_key=None, conversation_id=None, logger=None)
-    Initialises the client, uses optional initialised logger, and creates the underlying
-    provider client (AsyncOpenAI for Grok or ollama.AsyncClient for Ollama).
+    Initialises the client, uses optional initialised logger, and creates the
+    underlying provider client (AsyncOpenAI for Grok or ollama.AsyncClient for
+    Ollama).
     Depends on: logger.Logger, infopypg.async_dict_to_ResolvedSettingsDict.
 
 generate(request, stream=False, use_cache=True, **kwargs)
     Main entry point. Dispatches to the appropriate private generator based on
     provider. Returns a full response or an AsyncIterator of streaming chunks
     implementing LLMStreamingChunkProtocol.
+    For Ollama requests the 'think' key may be supplied inside request.options;
+    an UnsupportedThinkingModeError is raised if it is explicitly set for an
+    unsupported model.
     Interacts with: _grok_generate(), _ollama_generate(), _persist_interaction().
 
 parallel_generate(requests, max_concurrent=20, use_cache=True, **kwargs)
@@ -73,8 +80,10 @@ _grok_generate(), _grok_stream()
     Interacts with: client.responses.create(), GrokStreamingChunk.
 
 _ollama_generate(), _ollama_stream()
-    Ollama-specific paths (OpenAI-compatible chat endpoint).
-    Interacts with: client.chat(), OllamaStreamingChunk.
+    Ollama-specific paths (OpenAI-compatible chat endpoint) with strict
+    'think' validation.
+    Interacts with: _validate_think_option(), _model_supports_thinking(),
+    _perform_ollama_chat(), client.chat().
 
 Dependencies
 ------------
@@ -84,6 +93,7 @@ Dependencies
 - openai.AsyncOpenAI (for Grok Responses API)
 - ollama (for local inference)
 - asyncio (for parallel and streaming operations)
+- ai_api.core.errors (UnsupportedThinkingModeError)
 
 All methods respect the ≤40-line rule and prioritise efficiency (lazy pool
 creation, minimal allocations in hot paths, semaphore throttling).
@@ -120,6 +130,18 @@ from ai_api.data_structures.ollama import (
     OllamaResponse,
     OllamaStreamingChunk,
 )
+
+from .errors import UnsupportedThinkingModeError
+
+# Models known to support the 'think' parameter (Ollama 0.5+ thinking mode).
+# Update this set when new families gain support.
+THINK_SUPPORTED_FAMILIES: set[str] = {
+    "qwen3",
+    "qwen3.5",
+    "deepseek-r1",
+    "deepseek-v3",
+    "gpt-oss",
+}
 
 
 class LLMClient:
@@ -190,6 +212,29 @@ class LLMClient:
                 "LLMClient initialised",
                 extra={"obj": {"provider": provider, "model": model}},
             )
+
+    @staticmethod
+    def _model_supports_thinking(model: str) -> bool:
+        """Return True if the supplied model supports the 'think' parameter.
+
+        Parameters
+        ----------
+        model : str
+            Model identifier as passed to Ollama (e.g. "qwen3:8b").
+
+        Returns
+        -------
+        bool
+            True if the model family is in THINK_SUPPORTED_FAMILIES.
+
+        Notes
+        -----
+        The check is case-insensitive and uses substring matching for families.
+        """
+        if not model:
+            return False
+        model_lower: str = model.lower()
+        return any(family in model_lower for family in THINK_SUPPORTED_FAMILIES)
 
     async def _ensure_db_pool(self) -> None:
         """Lazily resolve settings and obtain the connection pool from PgPoolManager.
@@ -380,33 +425,121 @@ class LLMClient:
 
     async def _ollama_generate(
         self,
-        request: GrokRequest | OllamaRequest,
+        request: Any,                                                                     # replace with your concrete request type
+        stream: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        """Generate a response using the Ollama backend with strict 'think'
+        validation.
+
+        Parameters
+        ----------
+        request : Any
+            Request object containing model, messages and options.
+        stream : bool, default=False
+            Whether to stream the response.
+        **kwargs : Any
+            Additional keyword arguments passed to the underlying client.
+
+        Returns
+        -------
+        Any
+            The raw response from Ollama (or streaming iterator).
+
+        Raises
+        ------
+        UnsupportedThinkingModeError
+            If 'think' is explicitly supplied for an unsupported model.
+        """
+        options: dict[str, Any] = getattr(request, "options", {}) or {}
+        think_value: Any | None = options.get("think")
+
+        # validation is synchronous – no await required
+        self._validate_think_option(request.model, think_value)                           # line ~447 fixed
+
+        return await self._perform_ollama_chat(request, options, stream, **kwargs)
+
+    def _validate_think_option(self, model: str, think_value: Any | None) -> None:
+        """Validate the 'think' option before any network call.
+
+        Parameters
+        ----------
+        model : str
+            The model name.
+        think_value : Any | None
+            Value supplied by the caller for the 'think' key.
+
+        Raises
+        ------
+        UnsupportedThinkingModeError
+            If think_value is not None and model does not support it.
+        """
+        if think_value is None:
+            return                                                                        # not explicitly set → allowed
+
+        if not self._model_supports_thinking(model):
+            msg: str = (
+                f"The 'think' parameter (value={think_value!r}) was "
+                f"explicitly set, but is not supported by model "
+                f"'{model}'.  Supported families: "
+                f"{', '.join(sorted(THINK_SUPPORTED_FAMILIES))}."
+            )
+            raise UnsupportedThinkingModeError(msg)
+
+    async def _perform_ollama_chat(
+        self,
+        request: Any,
+        options: dict[str, Any],
         stream: bool,
         **kwargs: Any,
-    ) -> OllamaResponse | AsyncIterator[OllamaStreamingChunk]:
-        """Ollama-specific generation path.
+    ) -> Any:
+        """Execute the actual chat call to Ollama (safety-net fallback).
 
-        Merges payload safely to prevent duplicate keyword arguments
-        ('model', 'stream', 'messages', etc.) when calling ollama.AsyncClient.chat().
+        Parameters
+        ----------
+        request : Any
+            Original request object.
+        options : dict[str, Any]
+            Options dict (may contain 'think').
+        stream : bool
+            Streaming flag.
+        **kwargs : Any
+            Extra arguments.
+
+        Returns
+        -------
+        Any
+            Response from Ollama client.
+
+        Raises
+        ------
+        UnsupportedThinkingModeError
+            If Ollama still returns a think-related error (future-proofing).
         """
-        payload: dict[str, Any] = dict(request.to_payload())                              # explicit copy
-        payload["model"] = self.model
-        payload["stream"] = stream
-
-        if stream:
-            ollama_stream = await self.client.chat(                                       # type: ignore[union-attr]
-                **payload,
+        try:
+            response_raw = await self.client.chat(                                        # type: ignore[union-attr]
+                model=request.model,
+                messages=request.messages,
+                options=options,
+                stream=stream,
                 **kwargs,
             )
-            return self._ollama_stream(ollama_stream)
+        except ollama.ResponseError as exc:
+            # ResponseError stores message in .error (not .response)
+            if (
+                hasattr(exc, "error")
+                and "think value" in exc.error.lower()
+                and "not supported" in exc.error.lower()
+            ):
+                msg: str = (
+                    f"The 'think' parameter is not supported by model "
+                    f"'{request.model}'.  Original Ollama error: "
+                    f"{exc.error}"
+                )
+                raise UnsupportedThinkingModeError(msg) from exc
+            raise                                                                         # re-raise all other errors unchanged
 
-        response_raw = await self.client.chat(                                            # type: ignore[union-attr]
-            **payload,
-            **kwargs,
-        )
-        response = OllamaResponse.from_dict(response_raw)
-        await self._persist_interaction(request, response)
-        return response
+        return response_raw
 
     async def _ollama_stream(
         self, ollama_stream: Any
