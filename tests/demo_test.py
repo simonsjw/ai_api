@@ -86,6 +86,7 @@ def grok_client(
             model="grok-3",
             settings=mock_settings,
             api_key="dummy-key-for-testing",                                              # required by __init__
+            conversation_id="test-conversation-id",                                       # required by parallel_generate
         )
 
 
@@ -93,12 +94,15 @@ def grok_client(
 def ollama_request() -> OllamaRequest:
     """Minimal OllamaRequest for testing.
 
-    Attributes are set after creation to match what the client expects.
+    OllamaRequest is a frozen dataclass, therefore all fields must be supplied
+    at construction time.
     """
-    req = OllamaRequest(model="qwen3:8b")
-    req.messages = [{"role": "user", "content": "Hello"}]
-    req.options = {}
-    return req
+    return OllamaRequest(
+        model="qwen3:8b",
+        input="Hello",
+        messages=[{"role": "user", "content": "Hello"}],
+        options={},
+    )
 
 
 @pytest.fixture
@@ -150,7 +154,7 @@ async def test_ollama_think_supported(
     mock_ollama_client: MagicMock,
 ) -> None:
     """Confirm 'think' parameter succeeds on a supported model."""
-    ollama_request.options = {"think": "low"}
+    ollama_request.options = {"think": "low"}                                             # frozen dataclass allows replacement
     mock_ollama_client.chat.return_value = {"message": {"content": "reasoned"}}
     response = await ollama_client.generate(ollama_request, stream=False)
     assert response is not None
@@ -163,8 +167,12 @@ async def test_ollama_think_unsupported_raises(
     """Confirm UnsupportedThinkingModeError is raised when 'think' is set on an
     unsupported model.
     """
-    ollama_request.model = "llama3.2"                                                     # unsupported family
-    ollama_request.options = {"think": "low"}
+    ollama_request = OllamaRequest(                                                       # recreate with unsupported model
+        model="llama3.2",
+        input="Hello",
+        messages=[{"role": "user", "content": "Hello"}],
+        options={"think": "low"},
+    )
     with pytest.raises(UnsupportedThinkingModeError):
         await ollama_client.generate(ollama_request, stream=False)
 
@@ -183,11 +191,11 @@ async def test_ollama_think_none_does_not_raise(
 
 
 @pytest.mark.asyncio
-async def test_grok_generate(
-    grok_client: LLMClient, grok_request: GrokRequest, mock_grok_client: MagicMock
-) -> None:
+async def test_grok_generate(grok_client: LLMClient, grok_request: GrokRequest) -> None:
     """Verify Grok provider path works end-to-end."""
-    mock_grok_client.responses.create.return_value = {"output": "Grok answer"}
+    grok_client._grok_generate = AsyncMock(                                               # type: ignore[attr-defined]
+        return_value={"output": "Grok answer"}
+    )
     response = await grok_client.generate(grok_request, stream=False)
     assert response is not None
 
@@ -229,12 +237,13 @@ async def test_create_ollama_model(ollama_client: LLMClient) -> None:
     await ollama_client.create_ollama_model("FROM llama3\n")
 
 
-def test_get_embeddings(
+@pytest.mark.asyncio
+async def test_get_embeddings(
     ollama_client: LLMClient, mock_ollama_client: MagicMock
 ) -> None:
     """Verify embeddings endpoint (Ollama-only)."""
     mock_ollama_client.embeddings.return_value = [0.1, 0.2]
-    result = ollama_client.get_embeddings("test text")
+    result = await ollama_client.get_embeddings("test text")
     assert isinstance(result, list)
 
 
