@@ -458,7 +458,7 @@ class LLMClient:
         self._validate_think_option(request.model, think_value)                           # line ~447 fixed
 
         if stream:
-            raw_stream = self.client.chat(                                                # type: ignore[union-attr]
+            raw_stream = await self.client.chat(                                          # type: ignore[union-attr]
                 model=request.model,
                 messages=getattr(request, "messages", []),
                 options=options,
