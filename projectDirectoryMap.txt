@@ -1,0 +1,37 @@
+.
+├── src
+│   ├── ai_api
+│   │   ├── core
+│   │   │   ├── .mypy_cache
+│   │   │   ├── __pycache__
+│   │   │   ├── client.py
+│   │   │   ├── client.pyi
+│   │   │   ├── errors.py
+│   │   │   └── errors.pyi
+│   │   └── data_structures
+│   │       ├── .mypy_cache
+│   │       ├── db_responses_schema.py
+│   │       ├── db_responses_schema.pyi
+│   │       ├── grok.py
+│   │       ├── grok.pyi
+│   │       ├── __init__.py
+│   │       ├── ollama.py
+│   │       └── ollama.pyi
+│   └── ai_api.egg-info
+│       ├── dependency_links.txt
+│       ├── PKG-INFO
+│       ├── requires.txt
+│       ├── SOURCES.txt
+│       └── top_level.txt
+├── tests
+│   ├── .mypy_cache
+│   ├── __pycache__
+│   ├── createLogTable.sql
+│   ├── createTestDB.sql
+│   ├── demo_reasoning.py
+│   └── demo_test.py
+├── .gitignore
+├── pyproject.toml
+└── tree.txt
+
+12 directories, 23 files
