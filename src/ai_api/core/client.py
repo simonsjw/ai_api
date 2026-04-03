@@ -460,14 +460,14 @@ class LLMClient:
         if stream:
             raw_stream = self.client.chat(                                                # type: ignore[union-attr]
                 model=request.model,
-                messages=request.messages,
+                messages=getattr(request, "messages", []),
                 options=options,
                 stream=stream,
                 **kwargs,
             )
             return self._ollama_stream(raw_stream)
-        else:
-            return await self._perform_ollama_chat(request, options, stream, **kwargs)
+
+        return await self._perform_ollama_chat(request, options, stream=False, **kwargs)
 
     def _validate_think_option(self, model: str, think_value: Any | None) -> None:
         """Validate the 'think' option before any network call.
