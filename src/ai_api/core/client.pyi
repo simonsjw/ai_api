@@ -1,12 +1,14 @@
 import ollama
-from _typeshed import Incomplete as Incomplete
+from _typeshed import Incomplete
 from ai_api.data_structures.grok import GrokBatchRequest, GrokBatchResponse, GrokRequest, GrokResponse, LLMStreamingChunkProtocol
 from ai_api.data_structures.ollama import OllamaRequest, OllamaResponse
 from infopypg import ResolvedSettingsDict as ResolvedSettingsDict
 from logging import Logger
-from openai import AsyncOpenAI as AsyncOpenAI
+from openai import AsyncOpenAI
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal
+
+THINK_SUPPORTED_FAMILIES: set[str]
 
 class LLMClient:
     provider: Incomplete
