@@ -5,6 +5,7 @@ Use createTestDB.sql to create test database first."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
