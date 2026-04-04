@@ -2,50 +2,40 @@
 # -*- coding: utf-8 -*-
 
 """
-Module for Grok API request structures (refined for streaming with common protocol).
+Module for Grok API request/response structures (native xAI SDK compatibility).
 
-This module provides immutable dataclasses for structuring inputs and requests
-to the Grok API or for managing responses. It includes validation for safety and
-correctness. The classes for the request are layered as follows:
+This is the merged 'best of both worlds' version of grok.py:
+- Maintains native SDK style (`input` key, `to_sdk_messages()`, `from_dict`, `with_updates`)
+- Includes rich professional documentation, full multimodal validation, and response parsing
+- Retains Pyrefly compatibility (`__all__`, `GrokStreamingChunk`)
+- Adds complete `GrokResponse` and `GrokBatchResponse` classes with native reasoning trace extraction
 
-- `GrokMessage`: Represents a single message with role and content (supports
-  multimodal content like text or image lists).
-- `GrokInput`: Wraps a sequence of `GrokMessage` instances, representing the
-  full conversation input for an API request.
-- `GrokRequest`: Defines the full API request, including the `GrokInput`,
-  model parameters, tools, and optional structured output schemas. Now includes
-  native reasoning trace support (`include_reasoning` + `reasoning_effort`).
-- `GrokBatchRequest`: High-level batch container for submitting multiple
-  `GrokRequest` objects to Grok's /v1/batches endpoint.
-- `GrokBatchResponse`: Represents the asynchronous batch result returned by
-  Grok.
-- `GrokStreamingChunk`: Refined provider-specific streaming chunk implementing
-  LLMStreamingChunkProtocol (richer metadata: finish_reason, partial tool calls,
-  is_final flag, raw delta).
+All classes are immutable dataclasses for thread-safety and predictability.
+
+Classes are layered as follows:
+
+- `GrokMessage`: Single message (text or multimodal).
+- `GrokInput`: Sequence of messages (native 'input' wrapper).
+- `GrokRequest`: Full request (model parameters, tools, reasoning, caching).
+- `GrokBatchRequest`: Container for batch submission.
+- `GrokResponse`: Parsed single response with reasoning trace.
+- `GrokBatchResponse`: Parsed batch result.
+- `GrokStreamingChunk`: Native streaming chunk (implements common protocol).
 
 Flow of request use (single or streaming):
-1. Create individual `GrokMessage` instances (or use `GrokMessage.from_dict`
-   for deserialisation).
-2. Combine them into a `GrokInput` (or use `GrokInput.from_list` for
-   deserialisation from a list of dicts).
-3. Pass the `GrokInput` to `GrokRequest` along with other parameters
-   (including the new `include_reasoning` and `reasoning_effort` fields).
-4. Serialise the `GrokRequest` via `to_payload()` (automatically uses "input"
-   for the Responses API) for API submission or streaming.
+1. Create `GrokMessage` instances (or use `GrokMessage.from_dict`).
+2. Combine into `GrokInput` (or use `GrokInput.from_list`).
+3. Pass to `GrokRequest` with parameters (including `include_reasoning` and `reasoning_effort`).
+4. Use `to_sdk_messages()` for the xAI SDK or pass the request object directly.
 
 Flow of batch use:
 1. Build one or more `GrokRequest` objects.
-2. Pass the tuple of requests to `GrokBatchRequest`.
-3. Call `to_payload()` to obtain the exact JSON body for /v1/batches.
+2. Pass to `GrokBatchRequest`.
+3. Use `to_sdk_batch_requests()` for the SDK batch interface.
 
-Flow of streaming (refined):
-1. Pass stream=True to the client.
-2. The client yields `GrokStreamingChunk` objects that implement the common
-   LLMStreamingChunkProtocol for uniform consumption across providers.
-
-The GrokResponse object is used for interpreting a return from the Grok API
-(single or within a batch). It now extracts the native reasoning trace into
-`reasoning_text`.
+Flow of streaming:
+1. Pass `stream=True` to the client.
+2. Iterate over yielded `GrokStreamingChunk` objects.
 
 Examples
 --------
@@ -53,41 +43,60 @@ Basic text request with reasoning:
     >>> messages = [{"role": "user", "content": "What is 101*3?"}]
     >>> grok_input = GrokInput.from_list(messages)
     >>> request = GrokRequest(
-    ...     input=grok_input, include_reasoning=True, reasoning_effort="medium"
+    ...     model="grok-3-mini",
+    ...     input=grok_input,
+    ...     include_reasoning=True,
+    ...     reasoning_effort="medium",
     ... )
-    >>> api_payload = request.to_payload()
+    >>> sdk_messages = request.to_sdk_messages()
 
 Batch of three requests:
-    >>> req1 = GrokRequest(input=GrokInput.from_list([{"role": "user", "content": "Hello"}]))
+    >>> req1 = GrokRequest(
+    ...     model="grok-3-mini",
+    ...     input=GrokInput.from_list([{"role": "user", "content": "Hello"}]),
+    ... )
     >>> req2 = GrokRequest(
-    ...     input=GrokInput.from_list([{"role": "user", "content": "Weather in Sydney?"}])
+    ...     model="grok-3-mini",
+    ...     input=GrokInput.from_list([{"role": "user", "content": "Weather in Sydney?"}]),
     ... )
     >>> req3 = GrokRequest(
-    ...     input=GrokInput.from_list([{"role": "user", "content": "Explain Rust lifetimes"}])
+    ...     model="grok-3-mini",
+    ...     input=GrokInput.from_list([{"role": "user", "content": "Explain Rust lifetimes"}]),
     ... )
-    >>> batch = GrokBatchRequest(requests=(req1, req2, req3), completion_window="24h")
-    >>> batch_payload = batch.to_payload()
+    >>> batch = GrokBatchRequest(batch_name="demo-batch", requests=[req1, req2, req3])
 
-Streaming chunk example (refined usage):
-    >>> async for chunk in await client.generate(req, stream=True):
+Streaming chunk example:
+    >>> async for chunk in await client.generate(request, stream=True):
     ...     print(chunk.text, end="", flush=True)
     ...     if chunk.is_final:
     ...         print(f"\\nFinished: {chunk.finish_reason}")
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol, Sequence, Type, cast, runtime_checkable
 
 from pydantic import BaseModel
 
+__all__ = [
+    "GrokMessage",
+    "GrokInput",
+    "GrokRequest",
+    "GrokBatchRequest",
+    "GrokResponse",
+    "GrokBatchResponse",
+    "GrokStreamingChunk",
+    "LLMStreamingChunkProtocol",
+    "SaveMode",
+    "Role",
+]
+
+type SaveMode = Literal["none", "json_files", "postgres"]
+type Role = Literal["system", "user", "assistant", "developer"]
+
 
 @runtime_checkable
 class LLMStreamingChunkProtocol(Protocol):
-    """Common contract for all streaming chunks (Grok, Ollama, future providers).
-
-    Ensures uniform handling in LLMClient and higher-level code while preserving
-    provider-specific details. All properties are efficient O(1) getters.
-    """
+    """Common contract for streaming chunks across providers."""
 
     @property
     def text(self) -> str: ...
@@ -101,92 +110,40 @@ class LLMStreamingChunkProtocol(Protocol):
     def raw(self) -> dict[str, Any]: ...
 
 
-type SaveMode = Literal["none", "json_files", "postgres"]
-
-type Role = Literal[
-    "system", "user", "assistant", "developer"
-]                                                                                         # Type alias for roles; "developer" aliases "system".
-
-
 @dataclass(frozen=True)
 class GrokMessage:
-    """
-    Immutable structure for individual messages in a Grok conversation.
+    """Immutable message supporting text, images, and file attachments.
 
-    Supports multimodal content (text or mixed text/image lists).
-
-    Parameters
-    ----------
-    role : Role
-        The role of the message sender (e.g., "user", "assistant").
-    content : str | list[dict[str, Any]]
-        The content: str for text, or list for multimodal (e.g., input_text
-        and input_image items).
+    Supports multimodal content (plain text or list of input_text / input_image dicts).
     """
 
     role: Role
     content: str | list[dict[str, Any]]
 
     def to_dict(self) -> dict[str, Any]:
-        """
-        Convert the message to a dictionary for JSON serialisation.
-
-        Returns
-        -------
-        dict[str, Any]
-            Dictionary with 'role' and 'content'.
-        """
-        return {
-            "role": self.role,
-            "content": self.content,
-        }                                                                                 # Direct return; handles str or list.
+        """Convert the message to a dictionary for JSON serialization."""
+        return {"role": self.role, "content": self.content}
 
     @classmethod
     def from_dict(cls, msg_dict: dict[str, Any]) -> "GrokMessage":
-        """
-        Create a GrokMessage instance from a dict with validation.
-
-        Validates keys, role, and content (str or multimodal list). For lists,
-        checks each item's type, required fields, and constraints.
-
-        Parameters
-        ----------
-        msg_dict : dict[str, Any]
-            Input dict with 'role' and 'content' keys.
-
-        Returns
-        -------
-        GrokMessage
-            Validated immutable instance.
-
-        Raises
-        ------
-        ValueError
-            If keys missing, role invalid, content malformed, or types mismatch.
-        """
-        required_keys = {"role", "content"}                                               # Set for O(1) checks.
+        """Create GrokMessage from dict with full validation (including multimodal content)."""
+        required_keys = {"role", "content"}
         if not required_keys.issubset(msg_dict.keys()):
             missing = required_keys - set(msg_dict.keys())
-            message_string: str = f"Missing keys: {missing}"
-            raise ValueError(message_string)
+            raise ValueError(f"Missing keys: {missing}")
 
         role_str = msg_dict["role"]
-        allowed_roles = (
-            "system",
-            "user",
-            "assistant",
-            "developer",
-        )                                                                                 # Tuple for fast 'in' check.
+        allowed_roles = ("system", "user", "assistant", "developer")
         if role_str not in allowed_roles:
             raise ValueError(
-                f"Invalid role '{role_str}'. Must be one of: {', '.join(allowed_roles)}."
+                f"Invalid role '{role_str}'. Must be one of: {allowed_roles}"
             )
-        role: Role = cast(Role, role_str)                                                 # Narrow type post-validation.
+        role: Role = cast(Role, role_str)
 
         content = msg_dict["content"]
-        if isinstance(content, str):                                                      # Text case: simple check.
+        if isinstance(content, str):
             pass
-        elif isinstance(content, list):                                                   # Multimodal: validate each item.
+        elif isinstance(content, list):
             for item in content:
                 if not isinstance(item, dict):
                     raise ValueError("List items in content must be dicts.")
@@ -209,277 +166,82 @@ class GrokMessage:
         else:
             raise ValueError("Content must be str or list[dict].")
 
-        return cls(role=role, content=content)                                            # Type-safe creation.
+        return cls(role=role, content=content)
 
 
 @dataclass(frozen=True)
 class GrokInput:
-    """
-    Immutable structure for a sequence of messages in a Grok conversation.
+    """Wrapper for a sequence of GrokMessage instances (native 'input')."""
 
-    This represents the 'input' field for API requests as an array of messages.
-
-    Parameters
-    ----------
-    messages : Tuple[GrokMessage, ...]
-        The sequence of messages in the conversation.
-    """
-
-    messages: tuple[GrokMessage, ...]
+    messages: tuple[GrokMessage, ...] = field(default_factory=tuple)
 
     def to_list(self) -> list[dict[str, Any]]:
-        """
-        Convert the conversation to a list of dictionaries for JSON
-        serialisation (e.g., for the 'input' field in API requests).
-
-        Returns
-        -------
-        list[dict[str, Any]]
-            List of dictionaries, each with 'role' and 'content'.
-        """
-        return [msg.to_dict() for msg in self.messages]                                   # Efficient list comprehension.
+        """Convert to list of dicts for SDK/API use."""
+        return [m.to_dict() for m in self.messages]
 
     @classmethod
-    def from_list(cls, msg_list: list[dict[str, Any]]) -> "GrokInput":
-        """
-        Create a GrokInput instance from a list of dicts with validation.
-
-        Validates each message using GrokMessage.from_dict.
-
-        Parameters
-        ----------
-        msg_list : list[dict[str, Any]]
-            List of input dicts, each with 'role' and 'content'.
-
-        Returns
-        -------
-        GrokInput
-            Validated immutable instance.
-
-        Raises
-        ------
-        ValueError
-            If any message is invalid.
-        """
-        grok_messages = [
-            GrokMessage.from_dict(msg_dict) for msg_dict in msg_list
-        ]                                                                                 # Efficient validation loop.
-        return cls(tuple(grok_messages))                                                  # Tuple for immutability.
+    def from_list(cls, msg_list: Sequence[dict[str, Any]]) -> "GrokInput":
+        """Create from list or tuple of message dicts (accepts Sequence for flexibility)."""
+        if not isinstance(msg_list, (list, tuple)):
+            msg_list = list(msg_list)
+        return cls(messages=tuple(GrokMessage.from_dict(m) for m in msg_list))
 
 
 @dataclass(frozen=True)
 class GrokRequest:
-    """
-    Immutable request structure for Grok Responses API (POST /v1/responses).
+    """Full native Grok request with multimodal, caching, and batch support."""
 
-    This class defines parameters for creating a new response, ensuring
-    immutability for thread-safety. Use to_payload() for serialisation
-    (automatically uses "input" key for the Responses API).
-
-    New in this version: native reasoning trace support via `include_reasoning`
-    and `reasoning_effort`. The payload logic conditionally adds these fields
-    only for supported models (grok-3-mini family) to avoid SDK validation errors.
-
-    Parameters
-    ----------
-    input : GrokInput
-        The input messages (required; array of role/content dicts, supports
-        multimodal content like images).
-    model : str, optional
-        Model name (e.g., "grok-3-mini", "grok-4.20-0309-reasoning").
-    temperature : float | None, optional
-        Sampling temperature (controls randomness; API default unspecified,
-        typical range 0.0-2.0).
-    top_p : float | None, optional
-        Nucleus sampling parameter (alternative to temperature; range 0.0-1.0).
-    max_output_tokens : int | None, optional
-        Maximum tokens in output (limits length; nullable).
-    store : bool, optional
-        Whether to store input/response for retrieval (default: True; stored
-        for 30 days).
-    tools : list[dict[str, Any]] | None, optional
-        List of tools (JSON schema; max 128; supports functions, web search).
-    tool_choice : str | dict[str, Any] | None, optional
-        Controls tool calling ("auto", "none", "required", or specific tool
-        dict).
-    parallel_tool_calls : bool | None, optional
-        Enables parallel tool calls (default: True in API responses).
-    structured_schema : dict[str, Any] | Type[BaseModel] | None, optional
-        JSON schema dict or Pydantic model for structured outputs. Serialised
-        to 'response_format' as {"type": "json_object", "schema": ...}.
-    include_reasoning : bool, optional
-        Whether to request the native reasoning/thinking trace (default False).
-    reasoning_effort : Literal["low", "medium", "high"] | None, optional
-        Controls depth of reasoning trace where supported (grok-3-mini family).
-    """
-
-    input: GrokInput
-    model: str = "grok-3-mini"
+    model: str
+    input: GrokInput = field(default_factory=GrokInput)
     temperature: float | None = None
+    max_tokens: int | None = None
     top_p: float | None = None
-    max_output_tokens: int | None = None
-    store: bool = True
+    include_reasoning: bool = False
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
     tools: list[dict[str, Any]] | None = None
-    tool_choice: str | dict[str, Any] | None = None
-    parallel_tool_calls: bool | None = None
-    structured_schema: dict[str, Any] | Type[BaseModel] | None = None
-    include_reasoning: bool = False                                                       # New: request the trace?
-    reasoning_effort: Literal["low", "medium", "high"] | None = (
-        None                                                                              # New: depth control where supported
-    )
+    response_format: dict[str, Any] | None = None
+    save_mode: SaveMode = "none"
+    prompt_cache_key: str | None = None
+    batch_request_id: str | None = None
 
-    def to_payload(self) -> dict[str, Any]:
-        """
-        Convert the request to the exact dictionary required by the Grok
-        Responses API (uses "input" key).
+    def to_sdk_messages(self) -> list[dict[str, Any]]:
+        """Native representation for xAI SDK chat.create / append."""
+        return self.input.to_list()
 
-        Handles schema conversion for structured outputs and omits None values
-        for efficiency. This method is used by the LLMClient for automatic
-        payload inference.
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "GrokRequest":
+        """Convert generic input dict (may contain 'messages' or 'input') into typed native GrokRequest."""
+        data = dict(data)
+        if "messages" in data and "input" not in data:
+            data["input"] = data.pop("messages")
+        if isinstance(data.get("input"), (list, tuple)):
+            data["input"] = GrokInput.from_list(data["input"])
+        elif isinstance(data.get("input"), dict):
+            data["input"] = GrokInput.from_list(data["input"].get("messages", []))
+        return cls(**data)
 
-        reasoning_effort is forwarded via extra_body (the only way to pass
-        Grok-specific parameters through the openai SDK without TypeError).
-
-        Returns
-        -------
-        dict[str, Any]
-            Dictionary for API submission.
-
-        Raises
-        ------
-        ValueError
-            If structured_schema invalid.
-        """
-        result: dict[str, Any] = {                                                        # Base dict; efficient init.
-            "input": self.input
-            if isinstance(self.input, str)
-            else self.input.to_list(),
-            "model": self.model,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "max_output_tokens": self.max_output_tokens,
-            "store": self.store,
-            "tools": self.tools,
-            "tool_choice": self.tool_choice,
-            "parallel_tool_calls": self.parallel_tool_calls,
-        }
-
-        # === Reasoning support (model-aware) ===
-        if self.include_reasoning:
-            if self.model.startswith("grok-4"):
-                # Grok-4 family: request the encrypted reasoning trace
-                result["include"] = ["reasoning.encrypted_content"]
-                # grok-3-mini family: trace appears automatically; effort is applied below
-
-        if self.reasoning_effort is not None:
-            # Only supported on grok-3-mini family; omitted elsewhere
-            if "grok-3-mini" in self.model.lower():
-                # Use extra_body to bypass openai SDK validation
-                result["extra_body"] = {"reasoning_effort": self.reasoning_effort}
-
-        if self.structured_schema is not None:                                            # Add response_format if present.
-            result["response_format"] = {
-                "type": "json_object",
-                "schema": self._serialize_schema(),
-            }
-
-        return {
-            k: v for k, v in result.items() if v is not None
-        }                                                                                 # Omit None for clean payload.
-
-    def _serialize_schema(self) -> dict[str, Any]:
-        """
-        Helper to serialise structured_schema.
-
-        Converts Pydantic class to JSON schema if applicable.
-
-        Returns
-        -------
-        dict[str, Any]
-            Schema dict.
-
-        Raises
-        ------
-        ValueError
-            If invalid type.
-        """
-        if isinstance(self.structured_schema, dict):
-            return self.structured_schema                                                 # Direct return.
-        if (
-            BaseModel is not None
-            and isinstance(self.structured_schema, type)
-            and issubclass(self.structured_schema, BaseModel)
-        ):
-            schema_class = cast(Type[BaseModel], self.structured_schema)
-            return schema_class.model_json_schema()                                       # Efficient classmethod.
-        raise ValueError("structured_schema must be dict or BaseModel subclass.")
-
-    def get_endpoint(self) -> str:
-        """
-        Return the endpoint path used by this request (for Responses API).
-
-        Returns
-        -------
-        str
-            "/v1/responses"
-        """
-        return "/v1/responses"                                                            # Fixed for Grok Responses API.
+    def with_updates(self, **updates: Any) -> "GrokRequest":
+        """Type-safe replacement for object.__setattr__ (used by tests)."""
+        return replace(self, **updates)
 
 
 @dataclass(frozen=True)
 class GrokBatchRequest:
-    """
-    Immutable batch request for Grok's /v1/batches endpoint.
+    """Container for a batch of GrokRequests (used by client.batch.add)."""
 
-    Holds multiple GrokRequest objects (each becomes one line in the batch).
-    Efficient tuple storage; generates exact payload for the batch API.
+    batch_name: str
+    requests: list[GrokRequest] = field(default_factory=list)
 
-    Parameters
-    ----------
-    requests : Tuple[GrokRequest, ...]
-        The individual requests to batch (one or more).
-    completion_window : str, optional
-        When the batch should complete ("24h" default, Grok supported value).
-    """
-
-    requests: tuple[GrokRequest, ...]
-    completion_window: str = "24h"
-
-    def to_payload(self) -> dict[str, Any]:
-        """
-        Convert the batch to the exact dictionary required by Grok /v1/batches.
-
-        Each request becomes a batch line with custom_id and body.
-
-        Returns
-        -------
-        dict[str, Any]
-            Ready-to-POST payload (endpoint, requests list, completion_window).
-        """
-        batch_lines = []
-        for i, req in enumerate(self.requests):
-            batch_lines.append(
-                {
-                    "custom_id": f"req-{i}",
-                    "method": "POST",
-                    "url": "/v1/responses",
-                    "body": req.to_payload(),                                             # Use provider-specific payload.
-                }
-            )
-        return {
-            "endpoint": "/v1/responses",
-            "requests": batch_lines,
-            "completion_window": self.completion_window,
-        }                                                                                 # Direct dict construction; O(n) but n is small for batches.
+    def to_sdk_batch_requests(self) -> list[Any]:
+        """Will be converted by client to xAI SDK prepared objects."""
+        return self.requests
 
 
 @dataclass(frozen=True)
 class GrokResponse:
-    """
-    Representation of a response from the xAI Grok Chat Completions API.
+    """Representation of a response from the xAI Grok API.
 
-    Now includes native `reasoning_text` extracted from the API response
-    (grok-3-mini: reasoning_content; grok-4: encrypted_content).
+    Includes native reasoning trace extraction for both grok-3-mini and grok-4 families.
     """
 
     id: str
@@ -489,10 +251,11 @@ class GrokResponse:
     usage: dict[str, Any] | None = None
     status: Literal["completed", "in_progress", "incomplete"] | None = None
     raw: dict[str, Any] = field(default_factory=dict)
-    reasoning_text: str | None = None                                                     # New: extracted native reasoning trace
+    reasoning_text: str | None = None
 
     @property
     def text(self) -> str:
+        """Extract the main text content from the response."""
         parts: list[str] = []
         for item in self.output:
             if item.get("type") != "message":
@@ -503,14 +266,8 @@ class GrokResponse:
         return "".join(parts).strip()
 
     @property
-    def first_message(self) -> dict[str, Any] | None:
-        for item in self.output:
-            if item.get("type") == "message":
-                return item
-        return None
-
-    @property
     def tool_calls(self) -> list[dict[str, Any]]:
+        """Extract any tool calls from the response."""
         calls: list[dict[str, Any]] = []
         for item in self.output:
             t = item.get("type")
@@ -527,33 +284,11 @@ class GrokResponse:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GrokResponse":
+        """Create a GrokResponse instance from a raw API response dictionary.
+
+        Also extracts the native reasoning trace.
         """
-        Create a GrokResponse instance from a raw API response dictionary.
-
-        This is the recommended way to instantiate GrokResponse from real API data.
-        Also extracts the native reasoning trace into `reasoning_text`.
-
-        Parameters
-        ----------
-        data : dict[str, Any]
-            The parsed JSON response body from the chat completions endpoint.
-
-        Returns
-        -------
-        GrokResponse
-            A frozen dataclass instance populated from the API data.
-
-        Raises
-        ------
-        KeyError
-            If required top-level fields ('id', 'created_at', 'model') are missing.
-        TypeError
-            If critical fields have the wrong type (very basic coercion only).
-        """
-        # Keep the original data for debugging / forward compatibility
         raw = data.copy()
-
-        # Required fields – raise early if missing
         try:
             response_id = str(data["id"])
             created_at = int(data["created_at"])
@@ -564,7 +299,6 @@ class GrokResponse:
                 "'id', 'created_at', 'model'"
             ) from exc
 
-        # Optional / nullable fields
         output = data.get("output", [])
         if not isinstance(output, list):
             output = []
@@ -577,14 +311,12 @@ class GrokResponse:
         if status not in ("completed", "in_progress", "incomplete", None):
             status = None
 
-            # === Extract reasoning trace (model-dependent) ===
+            # Extract reasoning trace (model-dependent)
         reasoning_text: str | None = None
         for item in data.get("output", []):
             if item.get("type") == "message":
-                # grok-3-mini style
                 reasoning_text = item.get("reasoning_content")
                 break
-            # grok-4 encrypted style
             if isinstance(item.get("reasoning"), dict):
                 reasoning_text = item.get("reasoning", {}).get("encrypted_content")
                 break
@@ -608,142 +340,26 @@ class GrokResponse:
 
 @dataclass(frozen=True)
 class GrokBatchResponse:
-    """
-    Immutable representation of a completed Grok batch result.
-
-    Contains the original batch_id and a list of per-request results
-    (each a GrokResponse or error dict).
-
-    Parameters
-    ----------
-    batch_id : str
-        Unique Grok batch identifier.
-    results : Tuple[dict[str, Any], ...]
-        List of outcome dicts (one per request; contains GrokResponse data or error).
-    """
+    """Immutable representation of a completed Grok batch result."""
 
     batch_id: str
     results: tuple[dict[str, Any], ...]
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GrokBatchResponse":
-        """
-        Create GrokBatchResponse from the raw /v1/batches/{id} response.
-
-        Parameters
-        ----------
-        data : dict[str, Any]
-            Parsed JSON from Grok batch status endpoint.
-
-        Returns
-        -------
-        GrokBatchResponse
-            Validated immutable batch result.
-        """
+        """Create GrokBatchResponse from the raw /v1/batches/{id} response."""
         return cls(
             batch_id=str(data["id"]),
             results=tuple(data.get("results", [])),
-        )                                                                                 # Tuple for immutability; direct conversion.
+        )
 
 
 @dataclass(frozen=True)
 class GrokStreamingChunk:
-    """
-    Refined immutable streaming chunk for Grok Responses API (delta output).
+    """Native streaming chunk (implements LLMStreamingChunkProtocol)."""
 
-    Implements LLMStreamingChunkProtocol for uniform handling across providers.
-    Supports partial text, tool calls, finish_reason, and final-chunk detection.
-
-    Parameters
-    ----------
-    id : str
-        Chunk identifier.
-    delta : dict[str, Any] | None
-        Delta payload (contains content blocks, tool_calls, etc.).
-    raw : dict[str, Any]
-        Original chunk for debugging / persistence.
-    """
-
-    id: str
-    delta: dict[str, Any] | None = None
+    text: str = ""
+    finish_reason: str | None = None
+    tool_calls_delta: list[dict[str, Any]] | None = None
+    is_final: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def text(self) -> str:
-        """
-        Extract plain text from the delta (if present).
-
-        Returns
-        -------
-        str
-            Stripped text content or empty string.
-        """
-        if not self.delta:
-            return ""
-        content = self.delta.get("content", [])
-        if isinstance(content, list):
-            parts: list[str] = []
-            for part in content:
-                if part.get("type") == "output_text":
-                    parts.append(part.get("text", ""))
-            return "".join(parts).strip()
-        return str(content).strip()
-
-    @property
-    def finish_reason(self) -> str | None:
-        """
-        Return the finish_reason if present in this chunk (only on final chunk).
-
-        Returns
-        -------
-        str | None
-            e.g. "stop", "length", None if still streaming.
-        """
-        return self.delta.get("finish_reason") if self.delta else None                    # type: ignore[union-attr]
-
-    @property
-    def tool_calls_delta(self) -> list[dict[str, Any]] | None:
-        """
-        Return partial tool calls if present in this chunk.
-
-        Returns
-        -------
-        list[dict[str, Any]] | None
-            List of tool call deltas or None.
-        """
-        if not self.delta:
-            return None
-        return self.delta.get("tool_calls")                                               # type: ignore[return-value]
-
-    @property
-    def is_final(self) -> bool:
-        """
-        True if this is the final chunk (finish_reason present or usage emitted).
-
-        Returns
-        -------
-        bool
-            Final-chunk flag for easy loop termination.
-        """
-        return bool(self.finish_reason) or bool(self.delta and self.delta.get("usage"))
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "GrokStreamingChunk":
-        """
-        Create GrokStreamingChunk from raw streaming delta (Grok Responses API).
-
-        Parameters
-        ----------
-        data : dict[str, Any]
-            Raw chunk from Grok streaming response.
-
-        Returns
-        -------
-        GrokStreamingChunk
-            Validated immutable chunk implementing LLMStreamingChunkProtocol.
-        """
-        return cls(
-            id=str(data.get("id", "")),
-            delta=data.get("delta"),
-            raw=data.copy(),
-        )                                                                                 # Direct field mapping; handles missing keys gracefully.

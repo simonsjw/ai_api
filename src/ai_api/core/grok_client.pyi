@@ -1,0 +1,26 @@
+from ..data_structures.grok import GrokBatchRequest as GrokBatchRequest, GrokRequest, LLMStreamingChunkProtocol as LLMStreamingChunkProtocol, SaveMode as SaveMode
+from .grok_error import GrokAPIError as GrokAPIError, GrokPostgresError as GrokPostgresError, wrap_postgres_error as wrap_postgres_error
+from _typeshed import Incomplete
+from infopypg import ResolvedSettingsDict as ResolvedSettingsDict
+from logger import Logger
+from pathlib import Path
+from typing import Any, AsyncIterator
+
+REASONING_MODELS: set[str]
+SQL_INSERT_REQUEST: str
+SQL_INSERT_RESPONSE: str
+
+class GrokClient:
+    api_key: Incomplete
+    logger: Incomplete
+    settings: Incomplete
+    conversation_id: Incomplete
+    media_root: Path
+    def __init__(self, logger: Logger, api_key: str | None = None, pg_resolved_settings: ResolvedSettingsDict | None = None, settings: dict[str, Any] | None = None, conversation_id: str | None = None, media_root: str = 'media') -> None: ...
+    def create_request(self, **data: Any) -> GrokRequest: ...
+    async def generate(self, request: GrokRequest, stream: bool = False, **kwargs: Any) -> dict[str, Any] | AsyncIterator[LLMStreamingChunkProtocol]: ...
+    async def create_batch(self, batch_name: str) -> dict[str, Any]: ...
+    async def add_to_batch(self, batch_id: str, requests: list[GrokRequest]) -> None: ...
+    async def get_batch_status(self, batch_id: str) -> dict[str, Any]: ...
+    async def retrieve_batch_results(self, batch_id: str, limit: int = 100) -> dict[str, Any]: ...
+    async def retrieve_and_persist_batch_results(self, batch_id: str, limit: int = 100) -> dict[str, Any]: ...
