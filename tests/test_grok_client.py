@@ -118,14 +118,29 @@ def grok_client_unit(
 
 
 @pytest.fixture
-async def grok_client_live(test_pg_settings: dict) -> AsyncIterator[GrokClient]:
-    """Live GrokClient with real xAI API and fresh connection pool per test.
+async def grok_client_live(
+    test_logger: Logger,
+    test_pg_settings: dict,
+) -> AsyncIterator[GrokClient]:
+    """Live GrokClient instance for integration tests.
 
-    Ensures no cross-test event-loop pollution with asyncpg.
+    Uses the shared test_logger fixture (consistent with grok_client_unit)
+    and the real XAI_API_KEY. Skips gracefully if the key is missing.
+    Ensures no event-loop pollution by yielding a fresh client per test.
     """
-    client = GrokClient(api_key=os.getenv("XAI_API_KEY"))                                 # type: ignore[attr-defined]
+    api_key = os.getenv("XAI_API_KEY")
+    if not api_key:
+        pytest.skip("XAI_API_KEY environment variable not set for live tests.")
+
+    client = GrokClient(
+        logger=test_logger,                                                               # required post-refactor
+        api_key=api_key,
+    )
+
     yield client
-    # Explicit cleanup of any open pools
+
+    # Clean up any connection pool created by PgPoolManager (prevents
+    # "another operation in progress" / "event loop closed" errors).
     if hasattr(client, "_pool") and client._pool is not None:
         await client._pool.close()                                                        # type: ignore[attr-defined]
 
