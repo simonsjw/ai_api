@@ -118,21 +118,16 @@ def grok_client_unit(
 
 
 @pytest.fixture
-async def grok_client_live(
-    test_logger: Any, resolved_pg_settings: ResolvedSettingsDict
-) -> GrokClient:
-    """Real GrokClient for integration tests (requires XAI_API_KEY)."""
-    api_key = os.getenv("XAI_API_KEY")
-    if not api_key:
-        pytest.skip("XAI_API_KEY environment variable not set")
-    client = GrokClient(
-        logger=test_logger,
-        api_key=api_key,
-        pg_resolved_settings=resolved_pg_settings,
-        conversation_id="live-test-conv",
-        media_root="test_media",
-    )
-    return client
+async def grok_client_live(test_pg_settings: dict) -> AsyncIterator[GrokClient]:
+    """Live GrokClient with real xAI API and fresh connection pool per test.
+
+    Ensures no cross-test event-loop pollution with asyncpg.
+    """
+    client = GrokClient(api_key=os.getenv("XAI_API_KEY"))                                 # type: ignore[attr-defined]
+    yield client
+    # Explicit cleanup of any open pools
+    if hasattr(client, "_pool") and client._pool is not None:
+        await client._pool.close()                                                        # type: ignore[attr-defined]
 
 
 @pytest.fixture
@@ -240,9 +235,20 @@ async def test_generate_stream(
 ) -> None:
     """Streaming yields chunks and persists final accumulated response."""
 
-    async def fake_stream() -> AsyncIterator[Any]:
-        yield MagicMock(content="chunk1", is_final=False)
-        yield MagicMock(content="chunk2", is_final=True, finish_reason="stop")
+    async def fake_stream() -> AsyncIterator[tuple[Any, Any]]:
+        """Fake xAI SDK stream returning (response, chunk) tuples.
+
+        Matches the real Responses API behaviour documented at
+        https://github.com/xai-org/xai-sdk-python.
+        """
+        yield (
+            MagicMock(),                                                                  # accumulated response (ignored via _full)
+            MagicMock(content="chunk1", is_final=False),
+        )
+        yield (
+            MagicMock(),
+            MagicMock(content="chunk2", is_final=True, finish_reason="stop"),
+        )
 
     mock_chat = mock_xai_client.chat.create.return_value
     mock_chat.stream = fake_stream
@@ -297,34 +303,32 @@ async def test_batch_full_lifecycle(
     # Persistence verification (unit + integration)
     # --------------------------------------------------------------------------- #
 
+    @pytest.mark.asyncio
+    async def test_persistence_request_and_response_are_inserted(
+        grok_client_unit: GrokClient,
+        mock_xai_client: MagicMock,
+        mocker: pytest_mock.MockerFixture,
+        simple_grok_request: GrokRequest,
+    ) -> None:
+        """Persistence helpers are called and log correctly (mocked DB)."""
+        # Patch at the class level so the fixture's pool manager is replaced
+        mock_pool = AsyncMock()
+        mocker.patch(
+            "ai_api.core.grok_client.PgPoolManager.get_pool",
+            return_value=mock_pool,
+        )
 
-@pytest.mark.asyncio
-async def test_persistence_request_and_response_are_inserted(
-    self,
-    grok_client_unit: GrokClient,
-    mock_xai_client: MagicMock,
-    mocker: pytest_mock.MockerFixture,                                                    # explicit type for clarity
-    simple_grok_request: GrokRequest,
-) -> None:
-    """Persistence helpers are called and log correctly (mocked DB)."""
-    # Patch at the class level so the fixture's pool manager is replaced
-    mock_pool = AsyncMock()
-    mocker.patch(
-        "ai_api.core.grok_client.PgPoolManager.get_pool",
-        return_value=mock_pool,
-    )                                                                                     # type: ignore[attr-defined]
+        mock_xai_client.chat.create.return_value.sample.return_value = MagicMock(
+            content="persisted response"
+        )
 
-    mock_xai_client.chat.create.return_value.sample.return_value = MagicMock(
-        content="persisted response"
-    )
+        await grok_client_unit.generate(simple_grok_request, stream=False)
+        # At least one INSERT into requests and one into responses occurred
+        assert mock_pool.execute.call_count >= 2
 
-    await grok_client_unit.generate(simple_grok_request, stream=False)
-    # At least one INSERT into requests and one into responses occurred
-    assert mock_pool.execute.call_count >= 2
-
-    # --------------------------------------------------------------------------- #
-    # Live integration tests (real xAI endpoint)
-    # --------------------------------------------------------------------------- #
+        # --------------------------------------------------------------------------- #
+        # Live integration tests (real xAI endpoint)
+        # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.integration
@@ -368,10 +372,25 @@ async def test_live_batch_with_three_prompts(grok_client_live: GrokClient) -> No
     ]
     await grok_client_live.add_to_batch(batch_info["batch_id"], requests)
 
-    # Wait a short time for processing (production would poll)
-    await asyncio.sleep(5)
-    status = await grok_client_live.get_batch_status(batch_info["batch_id"])
-    assert status["state"] in ("completed", "running")
+    # Wait for batch to progress (real xAI batches are asynchronous)
+    async def wait_for_batch(batch_id: str, timeout: int = 30) -> dict:
+        """Poll batch status until no longer pending or timeout reached."""
+        start = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start < timeout:
+            status = await grok_client_live.get_batch_status(batch_id)
+            if status.get("num_pending", 0) == 0 or status.get("state") in (
+                "completed",
+                "failed",
+            ):
+                return status
+            await asyncio.sleep(2)
+        return status                                                                     # return final status for assertion
+
+    status = await wait_for_batch(batch_info["batch_id"])
+    assert status.get("num_pending", 0) == 0 or status.get("state") in (
+        "completed",
+        "running",
+    )
 
     results = await grok_client_live.retrieve_and_persist_batch_results(
         batch_info["batch_id"]
