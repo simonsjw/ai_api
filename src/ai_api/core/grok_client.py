@@ -560,7 +560,7 @@ class GrokClient:
             VALUES ($1, $2)
             ON CONFLICT (name) DO NOTHING
             """,
-            params=[name, "xAI"],
+            params=[name, "xai"],
             fetch=False,
             logger=self.logger,
         )
