@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import logging                                                                            # for level constants if needed
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -53,7 +54,14 @@ from ai_api.data_structures.grok import GrokRequest                             
 @pytest.fixture
 def test_logger() -> Any:
     """Return a real Logger instance configured for file output only."""
-    return setup_logger(log_location="test_logs/app.log", log_level=10)                   # DEBUG
+    # Use default file logging (rotating file handler); override path if a custom test directory is required
+    return setup_logger(
+        name="test_grok_client",                                                          # optional but recommended for clarity in logs
+        log_level=10,                                                                     # DEBUG
+        # Do not pass log_location for file-only behaviour
+        # If you need a specific test path, use:
+        # log_location="test_logs/app.log"
+    )
 
 
 @pytest.fixture
