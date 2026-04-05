@@ -136,15 +136,19 @@ async def grok_client_live(
 
 
 @pytest.fixture
-def simple_grok_request(grok_client_unit: GrokClient) -> GrokRequest:
+def simple_grok_request(
+    grok_client_unit: GrokClient, save_mode: str = "none"
+) -> GrokRequest:
     """Minimal valid GrokRequest using the instance create_request method.
 
-    Post-refactor the factory is intentionally an instance method.
+    Post-refactor the factory is intentionally an instance method. The
+    default save_mode="none" ensures unit tests do not invoke real
+    persistence (partition creation or provider lookup).
     """
     data = {
         "model": "grok-4",
         "input": "Explain the benefits of prompt caching in two sentences.",
-        "save_mode": "postgres",
+        "save_mode": save_mode,
     }
     return grok_client_unit.create_request(**data)                                        # type: ignore[attr-defined]
 
@@ -296,14 +300,19 @@ async def test_batch_full_lifecycle(
 
 @pytest.mark.asyncio
 async def test_persistence_request_and_response_are_inserted(
+    self,
     grok_client_unit: GrokClient,
     mock_xai_client: MagicMock,
+    mocker: pytest_mock.MockerFixture,                                                    # explicit type for clarity
     simple_grok_request: GrokRequest,
 ) -> None:
     """Persistence helpers are called and log correctly (mocked DB)."""
-    # The unit client already has _persist_* patched via fixture; we verify calls
+    # Patch at the class level so the fixture's pool manager is replaced
     mock_pool = AsyncMock()
-    PgPoolManager.get_pool.return_value = mock_pool                                       # type: ignore[attr-defined]
+    mocker.patch(
+        "ai_api.core.grok_client.PgPoolManager.get_pool",
+        return_value=mock_pool,
+    )                                                                                     # type: ignore[attr-defined]
 
     mock_xai_client.chat.create.return_value.sample.return_value = MagicMock(
         content="persisted response"
