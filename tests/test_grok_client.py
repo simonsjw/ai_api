@@ -136,14 +136,17 @@ async def grok_client_live(
 
 
 @pytest.fixture
-def simple_grok_request() -> GrokRequest:
-    """Minimal valid GrokRequest using create_request for correct internal structure."""
+def simple_grok_request(grok_client_unit: GrokClient) -> GrokRequest:
+    """Minimal valid GrokRequest using the instance create_request method.
+
+    Post-refactor the factory is intentionally an instance method.
+    """
     data = {
         "model": "grok-4",
         "input": "Explain the benefits of prompt caching in two sentences.",
         "save_mode": "postgres",
     }
-    return GrokClient.create_request(**data)                                              # type: ignore[attr-defined]
+    return grok_client_unit.create_request(**data)                                        # type: ignore[attr-defined]
 
 
 # --------------------------------------------------------------------------- #
