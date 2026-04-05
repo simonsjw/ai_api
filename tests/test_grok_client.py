@@ -22,57 +22,61 @@ Usage:
     pytest test_grok_client.py --integration   # real xAI calls only
 """
 
-from __future__ import annotations
-
-import asyncio
-import logging                                                                            # for level constants if needed
+import json
+import logging
 import os
-import uuid
-from collections.abc import AsyncIterator
-from dataclasses import replace
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
 
+import dotenv
 import pytest
-from infopypg import (
-    PgPoolManager,
-    ResolvedSettingsDict,
-    validate_dict_to_ResolvedSettingsDict,
-)
+
+# Import the required components from your refactored packages
+from infopypg import ResolvedSettingsDict, validate_dict_to_ResolvedSettingsDict
 from logger import setup_logger
 
-from ai_api.core.grok_client import GrokClient
-from ai_api.data_structures.grok import GrokRequest                                       # adjust import if needed
+# ─────────────────────────────────────────────────────────────────────────────
+# PostgreSQL Test Database Settings (loaded from environment variable)
+# ─────────────────────────────────────────────────────────────────────────────
+dotenv.load_dotenv()
+POSTGRES_DB_TEST_ENV = os.getenv(
+    "POSTGRES_DB_TEST",
+    '{ "db_user":"testuser", "db_host":"localhost", "db_port":"5432", '
+    '"db_name":"testdb", "password":"testpass", '
+    '"extensions": ["age", "amcheck", "bloom", "btree_gin", "btree_gist", '
+    '"citext", "dblink", "roaringbitmap", "seg", "sslinfo", "tablefunc", '
+    '"uuid-ossp", "vector", "xml2"] }',
+)
 
-# --------------------------------------------------------------------------- #
-# Fixtures – shared across all tests
-# --------------------------------------------------------------------------- #
+# Convert JSON string to Python dict and normalise keys to uppercase (required by infopypg)
+try:
+    raw_db_settings: dict[str, Any] = json.loads(POSTGRES_DB_TEST_ENV)
+except (json.JSONDecodeError, TypeError) as e:
+    raise RuntimeError(
+        f"Failed to parse POSTGRES_DB_TEST environment variable: {e}"
+    ) from e
 
 
-# Define your PostgreSQL connection settings once (e.g., at module level or in a separate config)
-DB_SETTINGS: dict[str, Any] = {
-    "DB_USER": "testuser",
-    "DB_HOST": "localhost",
-    "DB_PORT": "5432",
-    "DB_NAME": "testdb",
-    "PASSWORD": "testpass",
-}
+# Validate once at module level (Recommended: session-scoped fixture can reuse it)
+TEST_RESOLVED_SETTINGS: ResolvedSettingsDict = validate_dict_to_ResolvedSettingsDict(
+    raw_db_settings
+)
 
 
-@pytest.fixture(
-    scope="session"
-)                                                                                         # Use session scope if the logger can be shared across tests
+# ─────────────────────────────────────────────────────────────────────────────
+# Updated test_logger fixture – now uses PostgreSQL
+# ─────────────────────────────────────────────────────────────────────────────
+@pytest.fixture(scope="session")
 def test_logger() -> Any:
-    """Return a Logger instance configured for PostgreSQL output."""
-    # Validate and resolve the settings (enforces your single connection object type)
-    resolved_settings = validate_dict_to_ResolvedSettingsDict(DB_SETTINGS)
+    """Return a real Logger instance configured for PostgreSQL logging only.
 
+    This replaces the previous file-based setup and aligns with the recent
+    refactor in logger and infopypg (ResolvedSettingsDict is the single source
+    of truth for connections).
+    """
     return setup_logger(
-        logger_name="test_grok_client",                                                   # Recommended: provides clear logger identification
-        log_location=resolved_settings,                                                   # This selects PostgreSQL mode
-        log_level=logging.DEBUG,                                                          # or logging.INFO as appropriate
+        logger_name="test_grok_client",                                                   # Clear identifier in logs
+        log_location=TEST_RESOLVED_SETTINGS,                                              # This selects PostgreSQL mode
+        log_level=logging.DEBUG,                                                          # Adjust to logging.INFO if preferred
     )
 
 
