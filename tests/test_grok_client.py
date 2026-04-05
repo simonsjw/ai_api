@@ -32,6 +32,7 @@ from unittest.mock import MagicMock, patch
 import dotenv
 import pytest
 
+# Core packages
 # Import the required components from your refactored packages
 from infopypg import ResolvedSettingsDict, validate_dict_to_ResolvedSettingsDict
 from logger import Logger, setup_logger
@@ -98,13 +99,11 @@ def test_pg_settings() -> dict[str, Any]:
 
 
 @pytest.fixture
-async def resolved_pg_settings(
+def resolved_pg_settings(
     test_pg_settings: dict[str, Any], test_logger: Any
 ) -> ResolvedSettingsDict:
-    """Resolve settings to the typed dict expected by infopypg."""
-    return await validate_dict_to_ResolvedSettingsDict(
-        test_pg_settings, logger=test_logger
-    )
+    """Resolve raw dict to ResolvedSettingsDict (synchronous after refactor)."""
+    return validate_dict_to_ResolvedSettingsDict(test_pg_settings, logger=test_logger)
 
 
 @pytest.fixture
@@ -148,31 +147,18 @@ def grok_client_unit(
 
 @pytest.fixture
 async def grok_client_live(
-    test_logger: Logger,
-    test_pg_settings: dict,
-) -> AsyncIterator[GrokClient]:
-    """Live GrokClient instance for integration tests.
-
-    Injects test_logger (required post-refactor) and test_pg_settings so
-    save_mode='postgres' works correctly in streaming and batch tests.
-    Skips gracefully if the API key is missing. Ensures clean shutdown of
-    any connection pool.
-    """
-    api_key = os.getenv("XAI_API_KEY")
-    if not api_key:
-        pytest.skip("XAI_API_KEY environment variable not set for live tests.")
-
+    resolved_pg_settings: ResolvedSettingsDict, test_logger: Any
+) -> GrokClient:
+    """Live GrokClient configured with real PostgreSQL persistence."""
     client = GrokClient(
         logger=test_logger,
         api_key=api_key,
         pg_resolved_settings=test_pg_settings,                                            # required for postgres persistence
     )
-
-    yield client
-
-    # Explicit cleanup prevents "another operation in progress" / event-loop errors
-    if hasattr(client, "_pool") and client._pool is not None:
-        await client._pool.close()                                                        # type: ignore[attr-defined]
+    # Optional: quick connectivity check
+    if not await resolved_pg_settings.async_ping():
+        pytest.skip("Test PostgreSQL database is unreachable")
+    return client
 
 
 @pytest.fixture
