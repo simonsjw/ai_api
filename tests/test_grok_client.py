@@ -26,13 +26,16 @@ import json
 import logging
 import os
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import dotenv
 import pytest
 
 # Import the required components from your refactored packages
 from infopypg import ResolvedSettingsDict, validate_dict_to_ResolvedSettingsDict
-from logger import setup_logger
+from logger import Logger, setup_logger
+
+from ai_api.core.grok_client import GrokClient
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PostgreSQL Test Database Settings (loaded from environment variable)
