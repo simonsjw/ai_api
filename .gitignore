@@ -9,7 +9,10 @@ __pycache__/
 *$py.class
 *.egg-info/
 .mypy_cache/
+
+# PyTest
 .pytest_cache/
+tests/test_logs/
 
 # Editor / personal files
 .dir-locals.el
