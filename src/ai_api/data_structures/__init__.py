@@ -56,12 +56,13 @@ from .grok import (                                                             
     GrokRequest,
     GrokResponse,
 )
-from .ollama import (                                                                     # Ollama provider (no batch support)
-    OllamaInput,
-    OllamaMessage,
-    OllamaRequest,
-    OllamaResponse,
-)
+
+# from .ollama import (                                                                     # Ollama provider (no batch support)
+#     OllamaInput,
+#     OllamaMessage,
+#     OllamaRequest,
+#     OllamaResponse,
+# )
 
 __all__ = [
     # Grok classes (ordered by typical usage flow)
@@ -72,8 +73,8 @@ __all__ = [
     "GrokBatchResponse",
     "GrokResponse",
     # Ollama classes (ordered by typical usage flow)
-    "OllamaMessage",
-    "OllamaInput",
-    "OllamaRequest",
-    "OllamaResponse",
-]                                                                                         # Explicit __all__ for clean star-imports and IDE support.
+    # "OllamaMessage",
+    # "OllamaInput",
+    # "OllamaRequest",
+    # "OllamaResponse",
+]   # Explicit __all__ for clean star-imports and IDE support.
