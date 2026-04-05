@@ -176,15 +176,40 @@ class GrokInput:
     messages: tuple[GrokMessage, ...] = field(default_factory=tuple)
 
     def to_list(self) -> list[dict[str, Any]]:
-        """Convert to list of dicts for SDK/API use."""
-        return [m.to_dict() for m in self.messages]
+        """Native list-of-dict representation for xAI SDK chat.create / append."""
+        return [msg.to_dict() for msg in self.messages]                                   # O(n) but n is small.
 
     @classmethod
-    def from_list(cls, msg_list: Sequence[dict[str, Any]]) -> "GrokInput":
-        """Create from list or tuple of message dicts (accepts Sequence for flexibility)."""
-        if not isinstance(msg_list, (list, tuple)):
-            msg_list = list(msg_list)
-        return cls(messages=tuple(GrokMessage.from_dict(m) for m in msg_list))
+    def from_str(cls, text: str) -> "GrokInput":
+        """Convenience factory for single-user-message string input (post-refactor)."""
+        return cls(messages=(GrokMessage(role="user", content=text),))
+
+    @classmethod
+    def from_list(
+        cls, messages: Sequence[dict[str, Any] | GrokMessage] | None = None
+    ) -> "GrokInput":
+        """Create GrokInput from a sequence of message dictionaries or GrokMessage instances.
+
+        Each dictionary is validated and converted via GrokMessage.from_dict.
+        Pre-constructed GrokMessage objects are accepted unchanged.
+        This method satisfies the calls made by GrokRequest.from_dict and the
+        examples shown in the module docstring.
+        """
+        if messages is None or len(messages) == 0:
+            return cls(messages=tuple())
+
+        processed: list[GrokMessage] = []
+        for msg in messages:
+            if isinstance(msg, GrokMessage):
+                processed.append(msg)
+            elif isinstance(msg, dict):
+                processed.append(GrokMessage.from_dict(msg))
+            else:
+                raise TypeError(
+                    f"Expected dict[str, Any] or GrokMessage, got {type(msg).__name__}"
+                )
+
+        return cls(messages=tuple(processed))
 
 
 @dataclass(frozen=True)
@@ -205,8 +230,17 @@ class GrokRequest:
     batch_request_id: str | None = None
 
     def to_sdk_messages(self) -> list[dict[str, Any]]:
-        """Native representation for xAI SDK chat.create / append."""
-        return self.input.to_list()
+        """Native representation for xAI SDK chat.create / append.
+
+        Normalises legacy str input to GrokInput (single user message)
+        for backward compatibility with tests and direct construction.
+        """
+        if isinstance(self.input, str):                                                   # legacy convenience path
+            return GrokInput.from_str(self.input).to_list()
+        if isinstance(self.input, GrokInput):
+            return self.input.to_list()
+        # fallback for list-of-dict (rare)
+        return self.input if isinstance(self.input, list) else []
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GrokRequest":
