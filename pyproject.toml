@@ -35,6 +35,8 @@ markers = [
     "integration: mark test as slow integration test",
 ]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
 [build-system] # Build system configuration
 requires = ["setuptools>=61.0"]         # Requirements for building the package
 build-backend = "setuptools.build_meta" # Backend used for building
