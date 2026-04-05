@@ -86,7 +86,7 @@ class GrokInfopypgError(GrokError):
 
 
 class GrokInfopypgSettingsError(GrokInfopypgError):
-    """infopypg settings validation or resolution failed (async_dict_to_ResolvedSettingsDict)."""
+    """infopypg settings validation or resolution failed (validate_dict_to_ResolvedSettingsDict)."""
 
     pass
 

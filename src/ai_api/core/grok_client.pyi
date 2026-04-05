@@ -2,7 +2,7 @@ from ..data_structures.grok import GrokBatchRequest as GrokBatchRequest, GrokReq
 from .grok_error import GrokAPIError as GrokAPIError, GrokPostgresError as GrokPostgresError, wrap_postgres_error as wrap_postgres_error
 from _typeshed import Incomplete
 from infopypg import ResolvedSettingsDict as ResolvedSettingsDict
-from logger import Logger
+from logger import Logger as Logger
 from pathlib import Path
 from typing import Any, AsyncIterator
 
