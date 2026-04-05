@@ -456,7 +456,7 @@ class GrokClient:
             if any(req.save_mode == "postgres" for req in requests):
                 await self._persist_batch_requests(batch_id, requests)
             else:
-                self.logger.debug(
+                self.logger.info(
                     "Batch persistence skipped (save_mode != 'postgres')"
                 )                                                                         # 90-col comment start
 
