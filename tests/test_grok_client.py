@@ -41,6 +41,7 @@ from infopypg import (
     validate_dict_to_ResolvedSettingsDict,
 )
 from logger import Logger, setup_logger
+from pytest_mock import MockerFixture
 
 from ai_api.core.grok_client import GrokClient
 from ai_api.data_structures import GrokRequest
@@ -228,9 +229,9 @@ async def test_create_request_returns_valid_grok_request(
     assert isinstance(request, GrokRequest)
     assert request.model == "grok-4"
 
-    # --------------------------------------------------------------------------- #
+    # ---------------------------------------------------------------------------
     # Single generation – non-streaming
-    # --------------------------------------------------------------------------- #
+    # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -345,32 +346,33 @@ async def test_batch_full_lifecycle(
     # Persistence verification (unit + integration)
     # --------------------------------------------------------------------------- #
 
-    @pytest.mark.asyncio
-    async def test_persistence_request_and_response_are_inserted(
-        grok_client_unit: GrokClient,
-        mock_xai_client: MagicMock,
-        mocker: pytest_mock.MockerFixture,
-        simple_grok_request: GrokRequest,
-    ) -> None:
-        """Persistence helpers are called and log correctly (mocked DB)."""
-        # Patch at the class level so the fixture's pool manager is replaced
-        mock_pool = AsyncMock()
-        mocker.patch(
-            "ai_api.core.grok_client.PgPoolManager.get_pool",
-            return_value=mock_pool,
-        )
 
-        mock_xai_client.chat.create.return_value.sample.return_value = MagicMock(
-            content="persisted response"
-        )
+@pytest.mark.asyncio
+async def test_persistence_request_and_response_are_inserted(
+    grok_client_unit: GrokClient,
+    mock_xai_client: MagicMock,
+    mocker: MockerFixture,
+    simple_grok_request: GrokRequest,
+) -> None:
+    """Persistence helpers are called and log correctly (mocked DB)."""
+    # Patch at the class level so the fixture's pool manager is replaced
+    mock_pool = AsyncMock()
+    mocker.patch(
+        "ai_api.core.grok_client.PgPoolManager.get_pool",
+        return_value=mock_pool,
+    )
 
-        await grok_client_unit.generate(simple_grok_request, stream=False)
-        # At least one INSERT into requests and one into responses occurred
-        assert mock_pool.execute.call_count >= 2
+    mock_xai_client.chat.create.return_value.sample.return_value = MagicMock(
+        content="persisted response"
+    )
 
-        # --------------------------------------------------------------------------- #
-        # Live integration tests (real xAI endpoint)
-        # --------------------------------------------------------------------------- #
+    await grok_client_unit.generate(simple_grok_request, stream=False)
+    # At least one INSERT into requests and one into responses occurred
+    assert mock_pool.execute.call_count >= 2
+
+    # --------------------------------------------------------------------------- #
+    # Live integration tests (real xAI endpoint)
+    # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.integration
