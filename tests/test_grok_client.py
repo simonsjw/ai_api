@@ -25,6 +25,7 @@ Usage:
 import json
 import logging
 import os
+from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -36,6 +37,7 @@ from infopypg import ResolvedSettingsDict, validate_dict_to_ResolvedSettingsDict
 from logger import Logger, setup_logger
 
 from ai_api.core.grok_client import GrokClient
+from ai_api.data_structures import GrokRequest
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PostgreSQL Test Database Settings (loaded from environment variable)
@@ -77,8 +79,8 @@ def test_logger() -> Any:
     of truth for connections).
     """
     return setup_logger(
-        logger_name="test_grok_client",                                                   # Clear identifier in logs
-        log_location=TEST_RESOLVED_SETTINGS,                                              # This selects PostgreSQL mode
+        name="test_grok_client",                                                          # Clear identifier in logs
+        db_settings=TEST_RESOLVED_SETTINGS,                                               # This selects PostgreSQL mode
         log_level=logging.DEBUG,                                                          # Adjust to logging.INFO if preferred
     )
 
