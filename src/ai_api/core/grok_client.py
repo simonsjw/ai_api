@@ -452,7 +452,13 @@ class GrokClient:
                 batch_requests.append(chat)
 
                 # capture the batch.
-            await self._persist_batch_requests(batch_id, requests)
+                # TODO: ensure that if not captured here, the server is set to capture?
+            if any(req.save_mode == "postgres" for req in requests):
+                await self._persist_batch_requests(batch_id, requests)
+            else:
+                self.logger.debug(
+                    "Batch persistence skipped (save_mode != 'postgres')"
+                )                                                                         # 90-col comment start
 
             await self._client.batch.add(                                                 # type: ignore[attr-defined]
                 batch_id=batch_id, batch_requests=batch_requests
@@ -461,6 +467,7 @@ class GrokClient:
                 "Requests added to batch",
                 extra={"obj": {"batch_id": batch_id, "count": len(requests)}},
             )
+
         except Exception as exc:
             self.logger.error(
                 "Failed to add requests to batch",
