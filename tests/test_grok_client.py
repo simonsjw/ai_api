@@ -51,16 +51,28 @@ from ai_api.data_structures.grok import GrokRequest                             
 # --------------------------------------------------------------------------- #
 
 
-@pytest.fixture
+# Define your PostgreSQL connection settings once (e.g., at module level or in a separate config)
+DB_SETTINGS: dict[str, Any] = {
+    "DB_USER": "testuser",
+    "DB_HOST": "localhost",
+    "DB_PORT": "5432",
+    "DB_NAME": "testdb",
+    "PASSWORD": "testpass",
+}
+
+
+@pytest.fixture(
+    scope="session"
+)                                                                                         # Use session scope if the logger can be shared across tests
 def test_logger() -> Any:
-    """Return a real Logger instance configured for file output only."""
-    # Use default file logging (rotating file handler); override path if a custom test directory is required
+    """Return a Logger instance configured for PostgreSQL output."""
+    # Validate and resolve the settings (enforces your single connection object type)
+    resolved_settings = validate_dict_to_ResolvedSettingsDict(DB_SETTINGS)
+
     return setup_logger(
-        name="test_grok_client",                                                          # optional but recommended for clarity in logs
-        log_level=10,                                                                     # DEBUG
-        # Do not pass log_location for file-only behaviour
-        # If you need a specific test path, use:
-        # log_location="test_logs/app.log"
+        logger_name="test_grok_client",                                                   # Recommended: provides clear logger identification
+        log_location=resolved_settings,                                                   # This selects PostgreSQL mode
+        log_level=logging.DEBUG,                                                          # or logging.INFO as appropriate
     )
 
 
