@@ -27,7 +27,7 @@ import logging
 import os
 from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import dotenv
 import pytest
@@ -44,6 +44,8 @@ from ai_api.data_structures import GrokRequest
 # PostgreSQL Test Database Settings (loaded from environment variable)
 # ─────────────────────────────────────────────────────────────────────────────
 dotenv.load_dotenv()
+
+
 POSTGRES_DB_TEST_ENV = os.getenv(
     "POSTGRES_DB_TEST",
     '{ "db_user":"testuser", "db_host":"localhost", "db_port":"5432", '
@@ -149,13 +151,17 @@ def grok_client_unit(
 async def grok_client_live(
     resolved_pg_settings: ResolvedSettingsDict, test_logger: Any
 ) -> GrokClient:
-    """Live GrokClient configured with real PostgreSQL persistence."""
+    """Live GrokClient for integration tests with real xAI calls and PostgreSQL persistence."""
+    api_key = os.getenv("XAI_API_KEY")
+    if not api_key:
+        pytest.skip("XAI_API_KEY environment variable is not set. Skipping live tests.")
+
     client = GrokClient(
+        api_key=api_key,                                                                  # Pass the key properly
+        pg_resolved_settings=resolved_pg_settings,
         logger=test_logger,
-        api_key=api_key,
-        pg_resolved_settings=test_pg_settings,                                            # required for postgres persistence
     )
-    # Optional: quick connectivity check
+
     if not await resolved_pg_settings.async_ping():
         pytest.skip("Test PostgreSQL database is unreachable")
     return client
