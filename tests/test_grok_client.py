@@ -22,6 +22,7 @@ Usage:
     pytest test_grok_client.py --integration   # real xAI calls only
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -34,7 +35,11 @@ import pytest
 
 # Core packages
 # Import the required components from your refactored packages
-from infopypg import ResolvedSettingsDict, validate_dict_to_ResolvedSettingsDict
+from infopypg import (
+    PgPoolManager,
+    ResolvedSettingsDict,
+    validate_dict_to_ResolvedSettingsDict,
+)
 from logger import Logger, setup_logger
 
 from ai_api.core.grok_client import GrokClient
