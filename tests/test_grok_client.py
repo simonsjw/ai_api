@@ -374,6 +374,8 @@ async def test_persistence_request_and_response_are_inserted(
     mock_conn.execute = AsyncMock(return_value="INSERT 0 1")
     mock_conn.fetchval = AsyncMock(return_value=1)                                        # provider_id
 
+    mock_pool.acquire = MagicMock(return_value=acquire_cm)
+
     mocker.patch(
         "ai_api.core.grok_client.PgPoolManager.get_pool",
         return_value=mock_pool,
