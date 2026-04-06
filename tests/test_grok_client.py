@@ -354,7 +354,11 @@ async def test_persistence_request_and_response_are_inserted(
     mocker: MockerFixture,
     simple_grok_request: GrokRequest,
 ) -> None:
-    """Persistence helpers are called and log correctly (mocked DB)."""
+    """Persistence helpers are called and log correctly (mocked DB).
+
+    We force save_mode='postgres' so the _persist_request and _persist_response
+    code paths are exercised (the fixture simple_grok_request defaults to 'none').
+    """
     # Patch at the class level so the fixture's pool manager is replaced
     mock_pool = AsyncMock()
     mocker.patch(
@@ -366,7 +370,13 @@ async def test_persistence_request_and_response_are_inserted(
         content="persisted response"
     )
 
-    await grok_client_unit.generate(simple_grok_request, stream=False)
+    # Create a copy with persistence enabled (this is the key fix)
+    request_to_persist = simple_grok_request.model_copy(
+        update={"save_mode": "postgres"}
+    )
+
+    await grok_client_unit.generate(request_to_persist, stream=False)
+
     # At least one INSERT into requests and one into responses occurred
     assert mock_pool.execute.call_count >= 2
 
