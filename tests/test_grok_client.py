@@ -263,11 +263,12 @@ async def test_generate_unsupported_reasoning_raises(
     )
     with pytest.raises(Exception) as exc_info:                                            # actual exception defined in grok_error
         await grok_client_unit.generate(bad_request, stream=False)
-    assert "reasoning" in str(exc_info.value).lower()
 
-    # --------------------------------------------------------------------------- #
-    # Streaming generation
-    # --------------------------------------------------------------------------- #
+        assert "reasoning" in str(exc_info.value).lower()
+
+        # --------------------------------------------------------------------------- #
+        # Streaming generation
+        # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.asyncio
@@ -361,6 +362,18 @@ async def test_persistence_request_and_response_are_inserted(
     """
     # Patch at the class level so the fixture's pool manager is replaced
     mock_pool = AsyncMock()
+    mock_conn = AsyncMock()
+
+    # Proper async context manager for pool.acquire()
+    acquire_cm = AsyncMock()
+    acquire_cm.__aenter__.return_value = mock_conn
+    acquire_cm.__aexit__.return_value = None
+    mock_pool.acquire.return_value = acquire_cm
+
+    # Mock the methods actually called by execute_query
+    mock_conn.execute = AsyncMock(return_value="INSERT 0 1")
+    mock_conn.fetchval = AsyncMock(return_value=1)                                        # provider_id
+
     mocker.patch(
         "ai_api.core.grok_client.PgPoolManager.get_pool",
         return_value=mock_pool,
@@ -370,15 +383,18 @@ async def test_persistence_request_and_response_are_inserted(
         content="persisted response"
     )
 
-    # Create a copy with persistence enabled (this is the key fix)
-    request_to_persist = simple_grok_request.model_copy(
-        update={"save_mode": "postgres"}
-    )
+    # Force persistence
+    request_to_persist = simple_grok_request.with_updates(save_mode="postgres")
 
-    await grok_client_unit.generate(request_to_persist, stream=False)
+    # Execute and capture return value
+    result = await grok_client_unit.generate(request_to_persist, stream=False)
+
+    # Verify the full flow
+    assert isinstance(result, dict)
+    assert "output" in result or result.get("content") is not None
 
     # At least one INSERT into requests and one into responses occurred
-    assert mock_pool.execute.call_count >= 2
+    assert mock_conn.execute.call_count >= 2
 
     # --------------------------------------------------------------------------- #
     # Live integration tests (real xAI endpoint)
