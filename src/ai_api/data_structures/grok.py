@@ -73,9 +73,7 @@ Streaming chunk example:
 """
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal, Protocol, Sequence, Type, cast, runtime_checkable
-
-from pydantic import BaseModel
+from typing import Any, Literal, Protocol, Sequence, cast, runtime_checkable
 
 __all__ = [
     "GrokMessage",
@@ -114,59 +112,99 @@ class LLMStreamingChunkProtocol(Protocol):
 class GrokMessage:
     """Immutable message supporting text, images, and file attachments.
 
-    Supports multimodal content (plain text or list of input_text / input_image dicts).
+    Parameters
+    ----------
+    role : Role
+        Message role.
+    content : str | list[dict[str, Any]]
+        Text string or multimodal content list.
     """
 
     role: Role
     content: str | list[dict[str, Any]]
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert the message to a dictionary for JSON serialization."""
+        """Convert the message to a dictionary for JSON serialisation.
+
+        Returns
+        -------
+        dict[str, Any]
+            Serialisable representation.
+        """
         return {"role": self.role, "content": self.content}
 
     @classmethod
     def from_dict(cls, msg_dict: dict[str, Any]) -> "GrokMessage":
-        """Create GrokMessage from dict with full validation (including multimodal content)."""
+        """Create GrokMessage from dict with full validation.
+
+        Parameters
+        ----------
+        msg_dict : dict[str, Any]
+            Dictionary with 'role' and 'content'.
+
+        Returns
+        -------
+        GrokMessage
+            Validated instance.
+
+        Raises
+        ------
+        ValueError
+            If keys missing, role invalid or content malformed.
+        """
+        cls._validate_keys(msg_dict)                                                      # early key check
+        role = cls._validate_role(msg_dict["role"])
+        content = msg_dict["content"]
+        cls._validate_content(content)
+        return cls(role=role, content=content)
+
+    @staticmethod
+    def _validate_keys(msg_dict: dict[str, Any]) -> None:
+        """Validate required keys exist."""
         required_keys = {"role", "content"}
         if not required_keys.issubset(msg_dict.keys()):
             missing = required_keys - set(msg_dict.keys())
             raise ValueError(f"Missing keys: {missing}")
 
-        role_str = msg_dict["role"]
+    @staticmethod
+    def _validate_role(role_str: str) -> Role:
+        """Validate and cast role string."""
         allowed_roles = ("system", "user", "assistant", "developer")
         if role_str not in allowed_roles:
             raise ValueError(
                 f"Invalid role '{role_str}'. Must be one of: {allowed_roles}"
             )
-        role: Role = cast(Role, role_str)
+        return cast(Role, role_str)
 
-        content = msg_dict["content"]
+    @staticmethod
+    def _validate_content(content: Any) -> None:
+        """Validate content type and structure."""
         if isinstance(content, str):
-            pass
-        elif isinstance(content, list):
-            for item in content:
-                if not isinstance(item, dict):
-                    raise ValueError("List items in content must be dicts.")
-                typ = item.get("type")
-                if typ == "input_text":
-                    if "text" not in item or not isinstance(item["text"], str):
-                        raise ValueError("input_text requires 'text': str.")
-                elif typ == "input_image":
-                    if "image_url" not in item or not isinstance(
-                        item["image_url"], str
-                    ):
-                        raise ValueError("input_image requires 'image_url': str.")
-                    detail = item.get("detail", "auto")
-                    if detail not in ("auto", "low", "high"):
-                        raise ValueError("detail must be 'auto', 'low', or 'high'.")
-                elif typ is None:
-                    raise ValueError("Each item must have 'type' key.")
-                else:
-                    raise ValueError(f"Invalid type '{typ}' in content item.")
-        else:
+            return
+        if not isinstance(content, list):
             raise ValueError("Content must be str or list[dict].")
+        for item in content:
+            GrokMessage._validate_content_item(item)
 
-        return cls(role=role, content=content)
+    @staticmethod
+    def _validate_content_item(item: dict[str, Any]) -> None:
+        """Validate a single multimodal item."""
+        if not isinstance(item, dict):
+            raise ValueError("List items in content must be dicts.")
+        typ = item.get("type")
+        if typ == "input_text":
+            if "text" not in item or not isinstance(item["text"], str):
+                raise ValueError("input_text requires 'text': str.")
+        elif typ == "input_image":
+            if "image_url" not in item or not isinstance(item["image_url"], str):
+                raise ValueError("input_image requires 'image_url': str.")
+            detail = item.get("detail", "auto")
+            if detail not in ("auto", "low", "high"):
+                raise ValueError("detail must be 'auto', 'low', or 'high'.")
+        elif typ is None:
+            raise ValueError("Each item must have 'type' key.")
+        else:
+            raise ValueError(f"Invalid type '{typ}' in content item.")
 
 
 @dataclass(frozen=True)
@@ -176,28 +214,49 @@ class GrokInput:
     messages: tuple[GrokMessage, ...] = field(default_factory=tuple)
 
     def to_list(self) -> list[dict[str, Any]]:
-        """Native list-of-dict representation for xAI SDK chat.create / append."""
-        return [msg.to_dict() for msg in self.messages]                                   # O(n) but n is small.
+        """Native list-of-dict representation for xAI SDK.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            List of message dictionaries.
+        """
+        return [msg.to_dict() for msg in self.messages]
 
     @classmethod
     def from_str(cls, text: str) -> "GrokInput":
-        """Convenience factory for single-user-message string input (post-refactor)."""
+        """Convenience factory for single-user-message string input.
+
+        Parameters
+        ----------
+        text : str
+            User message text.
+
+        Returns
+        -------
+        GrokInput
+            Instance containing one user message.
+        """
         return cls(messages=(GrokMessage(role="user", content=text),))
 
     @classmethod
     def from_list(
         cls, messages: Sequence[dict[str, Any] | GrokMessage] | None = None
     ) -> "GrokInput":
-        """Create GrokInput from a sequence of message dictionaries or GrokMessage instances.
+        """Create GrokInput from sequence of dicts or GrokMessage objects.
 
-        Each dictionary is validated and converted via GrokMessage.from_dict.
-        Pre-constructed GrokMessage objects are accepted unchanged.
-        This method satisfies the calls made by GrokRequest.from_dict and the
-        examples shown in the module docstring.
+        Parameters
+        ----------
+        messages : Sequence[dict[str, Any] | GrokMessage] | None
+            Input messages.
+
+        Returns
+        -------
+        GrokInput
+            Validated input wrapper.
         """
-        if messages is None or len(messages) == 0:
+        if not messages:
             return cls(messages=tuple())
-
         processed: list[GrokMessage] = []
         for msg in messages:
             if isinstance(msg, GrokMessage):
@@ -206,9 +265,8 @@ class GrokInput:
                 processed.append(GrokMessage.from_dict(msg))
             else:
                 raise TypeError(
-                    f"Expected dict[str, Any] or GrokMessage, got {type(msg).__name__}"
+                    f"Expected dict or GrokMessage, got {type(msg).__name__}"
                 )
-
         return cls(messages=tuple(processed))
 
 
@@ -253,6 +311,89 @@ class GrokRequest:
         elif isinstance(data.get("input"), dict):
             data["input"] = GrokInput.from_list(data["input"].get("messages", []))
         return cls(**data)
+
+    def get_messages(self) -> list[dict[str, Any]]:
+        """Return normalised list of message dicts (role/content) for any input type.
+
+        Reuses the existing to_sdk_messages() normalisation to guarantee consistency.
+        """
+        if isinstance(self.input, str):
+            return [{"role": "user", "content": self.input}]
+        # Complex input (object with .messages, list of dicts, etc.)
+        messages = list(self.to_sdk_messages())
+        return messages
+
+    def to_chat_create_kwargs(self) -> dict[str, Any]:
+        """Return keyword arguments for xAI SDK `chat.create()`.
+
+        Centralises forwarding of all request parameters (tools, sampling
+        controls, etc.) for efficiency and single source of truth.
+
+        Returns
+        -------
+        dict[str, Any]
+            Kwargs compatible with `AsyncClient.chat.create`.
+        """
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "store_messages": True,                                                       # Enables Responses API + prompt caching
+        }
+        if self.tools is not None:
+            kwargs["tools"] = self.tools
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            kwargs["max_tokens"] = self.max_tokens
+        if self.top_p is not None:
+            kwargs["top_p"] = self.top_p
+        if self.response_format is not None:
+            kwargs["response_format"] = self.response_format
+            # reasoning_effort is model-dependent; handled by caller check
+        return kwargs
+
+    def extract_prompt_snippet(self, max_chars: int = 100) -> str:
+        """Extract a truncated prompt snippet from the first user message.
+
+        Handles both simple str input and complex message structures.
+        """
+        messages = self.get_messages()
+        for msg in messages:
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    return content[:max_chars]
+                elif isinstance(content, list):
+                    # For multimodal, join text parts only
+                    text_parts: list[str] = []
+                    for part in content:
+                        if isinstance(part, str):
+                            text_parts.append(part)
+                        elif (
+                            isinstance(part, dict) and part.get("type") == "input_text"
+                        ):
+                            text_parts.append(part.get("text", ""))
+                    snippet = " ".join(text_parts)
+                    return snippet[:max_chars]
+        return ""                                                                         # fallback for empty / system-only prompts
+
+    def has_media(self) -> bool:
+        """Return True if any user message contains multimodal content (images/files).
+
+        Detects list-style content or dicts with image/file types.
+        """
+        messages = self.get_messages()
+        for msg in messages:
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict):
+                        ptype = part.get("type")
+                        if ptype in ("input_image", "input_file"):
+                            return True
+                        # Future: extend for other media indicators if SDK evolves
+        return False
 
     def with_updates(self, **updates: Any) -> "GrokRequest":
         """Type-safe replacement for object.__setattr__ (used by tests)."""
@@ -370,6 +511,78 @@ class GrokResponse:
         txt = self.text[:80] + "…" if len(self.text) > 80 else self.text
         tc = len(self.tool_calls)
         return f"GrokResponse(id={self.id}, model={self.model}, text={txt!r}, tool_calls={tc})"
+
+    def get_messages(self) -> list[dict[str, Any]]:
+        """Return the assistant message(s) from the Grok response in normalised format.
+
+        Mirrors GrokRequest.get_messages() for consistent API usage across request/response objects.
+        """
+        messages: list[dict[str, Any]] = []
+        try:
+            # xAI SDK response follows OpenAI-compatible structure
+            raw = getattr(
+                self, "raw", getattr(self, "response", getattr(self, "data", {}))
+            )
+            choices = raw.get("choices", []) or raw.get("output", {}).get("choices", [])
+            for choice in choices:
+                message = choice.get("message") or choice.get("delta", {})
+                if message:
+                    role = message.get("role", "assistant")
+                    content = message.get("content")
+                    messages.append({"role": role, "content": content})
+
+                    # Include reasoning/thinking content when present (for supported models)
+                    reasoning = message.get("reasoning_content") or message.get(
+                        "reasoning"
+                    )
+                    if reasoning:
+                        messages.append({"role": "reasoning", "content": reasoning})
+        except (AttributeError, TypeError, KeyError):
+            # Graceful fallback for unexpected or minimal response structures
+            pass
+        return messages
+
+    def extract_response_snippet(self, max_chars: int = 200) -> str:
+        """Extract a truncated snippet of the main assistant response text.
+
+        Mirrors GrokRequest.extract_prompt_snippet() for consistent logging/persistence.
+        """
+        messages = self.get_messages()
+        for msg in messages:
+            if msg.get("role") in ("assistant", "reasoning"):
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    return content[:max_chars]
+                # Final fallback: direct raw lookup (common in xAI responses)
+        try:
+            raw = getattr(
+                self, "raw", getattr(self, "response", getattr(self, "data", {}))
+            )
+            content = raw.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if isinstance(content, str):
+                return content[:max_chars]
+        except (IndexError, AttributeError, TypeError):
+            pass
+        return ""
+
+    def get_reasoning_content(self, max_chars: int = 500) -> str | None:
+        """Return reasoning/thinking content if generated (for models that support include_reasoning)."""
+        messages = self.get_messages()
+        for msg in messages:
+            if msg.get("role") == "reasoning":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    return content[:max_chars]
+        return None
+
+    def has_media(self) -> bool:
+        """Return True if the response contains generated media (images, files, etc.).
+
+        Currently always False for Grok text completions; implemented for future-proofing
+        when image-generation or file-output capabilities are added to the xAI API.
+        """
+        # Grok-4 currently returns text-only output. Extend this method when needed.
+        return False
 
 
 @dataclass(frozen=True)

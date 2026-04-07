@@ -7,8 +7,6 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 REASONING_MODELS: set[str]
-SQL_INSERT_REQUEST: str
-SQL_INSERT_RESPONSE: str
 
 class GrokClient:
     api_key: Incomplete

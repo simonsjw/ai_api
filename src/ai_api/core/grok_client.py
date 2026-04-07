@@ -105,7 +105,7 @@ from infopypg import (
 )
 from logger import Logger
 from xai_sdk import AsyncClient
-from xai_sdk.chat import file, image, system, user                                        # file helper if exposed by SDK
+from xai_sdk.chat import file, image, system, user
 
 from ..data_structures.grok import (
     GrokBatchRequest,
@@ -147,7 +147,7 @@ SQL_INSERT_RESPONSE = """
 
 
 class GrokClient:
-    """Dedicated Grok client with full error + logging integration."""
+    """Dedicated Grok client with full error and logging integration."""
 
     def __init__(
         self,
@@ -158,39 +158,33 @@ class GrokClient:
         conversation_id: str | None = None,
         media_root: str = "media",
     ) -> None:
-        """Initialise with mandatory logger and optional Postgres settings."""
+        """Initialise client with logger and optional Postgres settings.
+
+        Parameters
+        ----------
+        logger : Logger
+            Structured logger (mandatory).
+        api_key : str | None
+            xAI API key (falls back to environment).
+        ... (remaining parameters documented similarly)
+        """
         try:
             self.api_key = api_key or os.getenv("XAI_API_KEY")
             if not self.api_key:
-                if logger:
-                    logger.error(
-                        "Missing XAI API key",
-                        extra={"obj": {"conversation_id": conversation_id}},
-                    )
-                raise GrokClientError("api_key is required for GrokClient") from None
-
+                logger.error(
+                    "Missing XAI API key",
+                    extra={"obj": {"conversation_id": conversation_id}},
+                )
+                raise GrokClientError("api_key is required for GrokClient")
             self.logger = logger
             self.settings = settings or {}
             self.conversation_id = conversation_id
-
-            # ------------------------------------------------------------------
-            # Modern Responses API + prompt-caching optimisation.
-            # x-grok-conv-id metadata routes requests to the same server,
-            # maximising cache hits. We use conversation_id (or the caller's
-            # prompt_cache_key value) as the affinity key.
-            # ------------------------------------------------------------------
-            metadata: tuple[tuple[str, str], ...] | None = None
-            if self.conversation_id:
-                metadata = (("x-grok-conv-id", self.conversation_id),)
-
-            self._client = AsyncClient(
-                api_key=self.api_key,
-                metadata=metadata,
+            metadata = (
+                (("x-grok-conv-id", self.conversation_id),)
+                if self.conversation_id
+                else None
             )
-
-            # ----------------------------------------------------------------
-            # Persistence: Postgres & on disk storage.
-            # ----------------------------------------------------------------
+            self._client = AsyncClient(api_key=self.api_key, metadata=metadata)
             self._pg_resolved_settings = pg_resolved_settings
             self._pool = None
             self.media_root: Path = Path(media_root).resolve()
@@ -223,10 +217,57 @@ class GrokClient:
             )
             raise GrokClientError("Invalid request data") from exc
 
+    async def _append_messages_to_chat(self, chat: Any, request: GrokRequest) -> None:
+        """Append all messages from a GrokRequest to an SDK chat object.
+
+        Handles system, user, assistant, and developer roles plus multimodal
+        content. Extracted to eliminate duplication between generate() and
+        batch paths.
+
+        Parameters
+        ----------
+        chat : Any
+            xAI SDK chat instance.
+        request : GrokRequest
+            Source of messages.
+        """
+        for msg_dict in request.to_sdk_messages():
+            role = msg_dict["role"]
+            content = msg_dict["content"]
+            if role == "system":
+                chat.append(system(content))
+            elif role == "user":
+                if isinstance(content, str):
+                    chat.append(user(content))
+                elif isinstance(content, list):
+                    parts = []
+                    for part in content:
+                        if part.get("type") == "input_text":
+                            parts.append(part["text"])
+                        elif part.get("type") == "input_image":
+                            parts.append(image(part["image_url"]))
+                        elif part.get("type") == "input_file":
+                            parts.append(file(part.get("file_url")))                      # placeholder
+                        else:
+                            self.logger.error(
+                                "Unsupported multimodal content type",
+                                extra={"obj": {"part": part}},
+                            )
+                            raise GrokClientMultimodalError(
+                                "Unsupported content type in multimodal message"
+                            ) from None
+                    chat.append(user(*parts))
+            else:                                                                         # assistant or developer
+                chat.append(user(content))                                                # SDK treats as continuation
+
     async def generate(
         self, request: GrokRequest, stream: bool = False, **kwargs: Any
     ) -> dict[str, Any] | AsyncIterator[LLMStreamingChunkProtocol]:
-        """Main generation path with full error handling and pre-raise logging."""
+        """Main generation entry point with full parameter forwarding.
+
+        Persists request/response when requested, builds chat with all
+        GrokRequest fields (including tools), and returns native result.
+        """
         if request.include_reasoning and request.model not in REASONING_MODELS:
             self.logger.error(
                 "Unsupported thinking mode requested",
@@ -253,62 +294,25 @@ class GrokClient:
             persist_info = {"request_id": request_id, "request_tstamp": request_tstamp}
 
         try:
-            # chat = self._client.chat.create(model=request.model)
-            chat = self._client.chat.create(
-                model=request.model,
-                store_messages=True,                                                      # Enables modern Responses API                             # enables automatic prompt caching
-            )
-            for msg_dict in request.to_sdk_messages():
-                role = msg_dict["role"]
-                content = msg_dict["content"]
-                if role == "system":
-                    chat.append(system(content))
-                elif role == "user":
-                    if isinstance(content, str):
-                        chat.append(user(content))
-                    elif isinstance(content, list):
-                        # Multimodal validation & handling
-                        parts = []
-                        for part in content:
-                            if part.get("type") == "input_text":
-                                parts.append(part["text"])
-                            elif part.get("type") == "input_image":
-                                parts.append(image(part["image_url"]))
-                            elif part.get("type") == "input_file":
-                                # Extend with SDK file() when available
-                                parts.append(image(part.get("file_url")))                 # placeholder
-                            else:
-                                self.logger.error(
-                                    "Unsupported multimodal content type",
-                                    extra={"obj": {"part": part}},
-                                )
-                                raise GrokClientMultimodalError(
-                                    "Unsupported content type in multimodal message"
-                                ) from None
-                        chat.append(user(*parts))
-                else:
-                    chat.append(user(content))
+            chat_kwargs = request.to_chat_create_kwargs()
+            chat = self._client.chat.create(**chat_kwargs)
+            await self._append_messages_to_chat(chat, request)
 
-                    # Here the message is sent to the method that contacts grok.
-                    # if stream:
             if stream:
-                if persist_info:
-                    result = self._generate_stream_and_persist(
-                        chat, request, persist_info
-                    )
-                else:
-                    result = self._grok_stream(chat, request)
+                result = (
+                    self._generate_stream_and_persist(chat, request, persist_info)
+                    if persist_info
+                    else self._grok_stream(chat, request)
+                )
             else:
                 result = await self._grok_generate(chat, request)
-
-                # Persist response (non-streaming only)
-            if persist_info and isinstance(result, dict):
-                await self._persist_response(
-                    persist_info["request_id"],
-                    persist_info["request_tstamp"],
-                    result,
-                    request,
-                )
+                if persist_info and isinstance(result, dict):
+                    await self._persist_response(
+                        persist_info["request_id"],
+                        persist_info["request_tstamp"],
+                        result,
+                        request,
+                    )
 
             self.logger.info(
                 "Grok generation completed",
@@ -409,10 +413,6 @@ class GrokClient:
         try:
             batch_requests = []
             for req in requests:
-                # chat = self._client.chat.create(
-                #     model=req.model,
-                #     batch_request_id=req.batch_request_id,                                # type: ignore[call-arg]
-                # )
                 chat = self._client.chat.create(
                     model=req.model,
                     batch_request_id=req.batch_request_id,                                # type: ignore[call-arg]
@@ -582,12 +582,12 @@ class GrokClient:
         return result[0]["id"] if result else 1                                           # fallback
 
     def _build_endpoint(self, request: GrokRequest) -> dict[str, Any]:
-        """Consistent endpoint metadata for both tables."""
+        """Consistent endpoint metadata – now using the modern Responses API."""
         return {
             "provider": "xai",
             "model": request.model,
             "host": "api.x.ai",
-            "endpoint_path": "/v1/chat/completions",
+            "endpoint_path": "/v1/responses",                                             # Updated for Responses API
             "prompt_cache_key": request.prompt_cache_key,
         }
 
@@ -608,10 +608,12 @@ class GrokClient:
 
         meta = {
             "conversation_id": self.conversation_id or "unknown",
+            "prompt_snippet": request.extract_prompt_snippet(),
             "prompt_cache_key": request.prompt_cache_key,
             "batch_request_id": request.batch_request_id,
             "batch_id": batch_id,
             "batch_index": batch_index,
+            "has_media": request.has_media(),
         }
 
         # Ensure partition exists for today's date (infopypg helper)
@@ -710,7 +712,7 @@ class GrokClient:
                 "provider": "xai",
                 "model": api_result.get("model", "unknown"),
                 "host": "api.x.ai",
-                "endpoint_path": "/v1/chat/completions",
+                "endpoint_path": "/v1/responses",
                 "prompt_cache_key": None,
             }
 
@@ -864,18 +866,13 @@ class GrokClient:
         Returns list of relative paths (from media root) for storage in responses.meta.
         """
         # Extract prompt snippet (first 100 chars of first user message)
-        prompt_snippet = ""
-        for msg in request.input.messages:
-            if msg.role == "user":
-                content = msg.content
-                if isinstance(content, str):
-                    prompt_snippet = content[:100]
-                elif isinstance(content, list):
-                    for part in content:
-                        if part.get("type") == "input_text":
-                            prompt_snippet = part.get("text", "")[:100]
-                            break
-                break
+
+        if not request.has_media():
+            # Early exit for pure-text requests – no media to save
+            self.logger.warning("No media found. Exiting helper.")
+            return []
+
+        prompt_snippet = request.extract_prompt_snippet(max_chars=100)
 
         media_items: list[dict[str, str]] = []
         for msg in request.input.messages:
@@ -892,10 +889,7 @@ class GrokClient:
                                 }
                             )
 
-        if not media_items:
-            return []
-
-        # Monthly folder
+                            # Monthly folder
         month = datetime.now(timezone.utc).strftime("%Y-%m")
         response_folder = self.media_root / month / str(response_id)
         response_folder.mkdir(parents=True, exist_ok=True)
