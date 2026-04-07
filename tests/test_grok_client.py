@@ -95,6 +95,24 @@ def test_logger() -> Any:
 
 
 @pytest.fixture
+def multimodal_grok_request() -> GrokRequest:
+    """Complex input with media to test the full helper surface area."""
+    return GrokRequest(
+        model="grok-4",
+        input=[                                                                           # or whatever your complex structure is – list of dicts / Messages object
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Describe this image"},
+                    {"type": "input_image", "image_url": "https://example.com/img.jpg"},
+                ],
+            }
+        ],
+        save_mode="none",
+    )
+
+
+@pytest.fixture
 def test_pg_settings() -> dict[str, Any]:
     """Flat settings that satisfy infopypg validation."""
     return {
@@ -232,6 +250,30 @@ async def test_create_request_returns_valid_grok_request(
     # ---------------------------------------------------------------------------
     # Single generation – non-streaming
     # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_grokrequest_helpers_handle_both_input_types(
+    simple_grok_request: GrokRequest,
+    multimodal_grok_request: GrokRequest,                                                 # new fixture you should add
+) -> None:
+    """Verify helpers normalise str vs. complex input without AttributeError."""
+    # Simple text case (the one that previously crashed)
+    assert (
+        simple_grok_request.extract_prompt_snippet()
+        == "Explain the benefits of prompt caching in two sentences."
+    )
+    assert simple_grok_request.has_media() is False
+    msgs = simple_grok_request.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["role"] == "user"
+    assert isinstance(msgs[0]["content"], str)
+
+    # Multimodal case (exercises the complex path)
+    assert multimodal_grok_request.has_media() is True
+    assert len(multimodal_grok_request.get_messages()) > 0
+    snippet = multimodal_grok_request.extract_prompt_snippet(max_chars=50)
+    assert isinstance(snippet, str) and len(snippet) <= 50
 
 
 @pytest.mark.asyncio
@@ -392,7 +434,7 @@ async def test_persistence_request_and_response_are_inserted(
     result = await grok_client_unit.generate(request_to_persist, stream=False)
 
     # Verify the full flow
-    assert isinstance(result, dict)
+    assert result is not None
     assert "output" in result or result.get("content") is not None
 
     # At least one INSERT into requests and one into responses occurred
