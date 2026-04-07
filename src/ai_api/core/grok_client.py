@@ -158,15 +158,35 @@ class GrokClient:
         conversation_id: str | None = None,
         media_root: str = "media",
     ) -> None:
-        """Initialise client with logger and optional Postgres settings.
+        """Initialise the GrokClient instance.
 
         Parameters
         ----------
         logger : Logger
-            Structured logger (mandatory).
+            Structured logger (mandatory for all operations).
         api_key : str | None
-            xAI API key (falls back to environment).
-        ... (remaining parameters documented similarly)
+            xAI API key. Falls back to XAI_API_KEY environment variable if
+            None.
+        pg_resolved_settings : ResolvedSettingsDict | None
+            Resolved PostgreSQL settings for infopypg persistence.
+        settings : dict[str, Any] | None
+            Additional client configuration dictionary.
+        conversation_id : str | None
+            Conversation identifier used for prompt caching via x-grok-conv-id
+            metadata.
+        media_root : str
+            Root directory for downloaded media files (default "media").
+
+        Raises
+        ------
+        GrokClientError
+            If the API key is missing or initialisation fails.
+
+        Notes
+        -----
+        The underlying AsyncClient is created with optional metadata for
+        prompt-caching server affinity. The PostgreSQL pool is initialised
+        lazily on first use.
         """
         try:
             self.api_key = api_key or os.getenv("XAI_API_KEY")
@@ -207,7 +227,25 @@ class GrokClient:
             raise GrokClientError("Failed to initialise GrokClient") from exc
 
     def create_request(self, **data: Any) -> GrokRequest:
-        """Convert generic dict → native GrokRequest (wraps data-layer ValueError)."""
+        """Convert generic dictionary into a validated GrokRequest object.
+
+        Parameters
+        ----------
+        **data : Any
+            Arbitrary keyword arguments that will be passed to
+            GrokRequest.from_dict.
+
+        Returns
+        -------
+        GrokRequest
+            Fully validated request object.
+
+        Raises
+        ------
+        GrokClientError
+            If the supplied data is invalid (wrapped ValueError from the data
+            layer).
+        """
         try:
             return GrokRequest.from_dict(data)
         except ValueError as exc:
