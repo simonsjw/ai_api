@@ -2,74 +2,76 @@
 # -*- coding: utf-8 -*-
 
 """
-Module for Grok API request/response structures (native xAI SDK compatibility).
+Grok API data models for the ai_api package.
 
-This is the merged 'best of both worlds' version of grok.py:
-- Maintains native SDK style (`input` key, `to_sdk_messages()`, `from_dict`, `with_updates`)
-- Includes rich professional documentation, full multimodal validation, and response parsing
-- Retains Pyrefly compatibility (`__all__`, `GrokStreamingChunk`)
-- Adds complete `GrokResponse` and `GrokBatchResponse` classes with native reasoning trace extraction
+This module defines the complete, type-safe set of data structures required to
+interact with the xAI Grok API. It provides a clean abstraction layer for both
+single-request and batch operations, streaming responses, persistence
+configuration, and message construction.
 
-All classes are immutable dataclasses for thread-safety and predictability.
+All public classes, protocols, and enumerations are exported via ``__all__``
+and are designed to work seamlessly with ``GrokClient`` (the primary entry point
+in ``core/grok_client.py``).
 
-Classes are layered as follows:
+Public exports (defined in ``__all__``):
 
-- `GrokMessage`: Single message (text or multimodal).
-- `GrokInput`: Sequence of messages (native 'input' wrapper).
-- `GrokRequest`: Full request (model parameters, tools, reasoning, caching).
-- `GrokBatchRequest`: Container for batch submission.
-- `GrokResponse`: Parsed single response with reasoning trace.
-- `GrokBatchResponse`: Parsed batch result.
-- `GrokStreamingChunk`: Native streaming chunk (implements common protocol).
+1. **Request Hierarchy** (GrokMessage → GrokInput → GrokRequest)
+   - ``GrokMessage``: The fundamental building block of a conversation. It
+     represents a single message with a ``role`` (from the ``Role`` enum) and
+     ``content`` (text or multimodal parts).
+   - ``GrokInput``: A flexible container that accepts either a simple ``str``
+     (for quick text-only prompts) or a list of ``GrokMessage`` objects (for
+     system prompts, multimodal content, tools, etc.).
+   - ``GrokRequest``: The top-level request model. It composes a ``GrokInput``
+     (or simple string) with API parameters (``model``, ``temperature``,
+     ``max_tokens``, ``include_reasoning``, etc.) and configuration options
+     such as ``save_mode`` and ``prompt_cache_key``. All calls to
+     ``GrokClient.generate()`` begin with a ``GrokRequest``.
 
-Flow of request use (single or streaming):
-1. Create `GrokMessage` instances (or use `GrokMessage.from_dict`).
-2. Combine into `GrokInput` (or use `GrokInput.from_list`).
-3. Pass to `GrokRequest` with parameters (including `include_reasoning` and `reasoning_effort`).
-4. Use `to_sdk_messages()` for the xAI SDK or pass the request object directly.
+2. **Batch Processing**
+   - ``GrokBatchRequest``: Groups multiple ``GrokRequest`` objects into a single
+     batch submission. It reduces API overhead and cost when processing many
+     prompts together and provides batch-level metadata (``batch_id``,
+     ``batch_index``, etc.).
+   - ``GrokBatchResponse``: The corresponding response object that aggregates
+     the individual results of each request in a completed batch.
 
-Flow of batch use:
-1. Build one or more `GrokRequest` objects.
-2. Pass to `GrokBatchRequest`.
-3. Use `to_sdk_batch_requests()` for the SDK batch interface.
+3. **Response and Streaming Models**
+   - ``GrokResponse``: Represents a single successful response from the Grok
+     API. It is instantiated exclusively via the factory method
+     ``GrokResponse.from_dict()`` and provides symmetric helper methods to
+     ``GrokRequest`` (``get_messages()``, ``extract_response_snippet()``,
+     ``get_reasoning_content()``, ``has_media()``).
+   - ``GrokStreamingChunk``: Concrete implementation of a single chunk of
+     streamed output received during a streaming generation.
+   - ``LLMStreamingChunkProtocol``: A structural Protocol (using ``typing.Protocol``)
+     that ``GrokStreamingChunk`` implements. It defines the common interface
+     expected by streaming consumers across different LLM providers in the
+     ``ai_api`` package, enabling polymorphic handling of streaming results.
 
-Flow of streaming:
-1. Pass `stream=True` to the client.
-2. Iterate over yielded `GrokStreamingChunk` objects.
+4. **Supporting Types**
+   - ``SaveMode``: Enumeration that controls persistence behaviour for a
+     request/response pair. Valid values are typically ``"none"`` (no
+     persistence) and ``"postgres"`` (full request and response logging to the
+     PostgreSQL database via ``_persist_request()`` and ``_persist_response()``
+     in ``GrokClient``).
+   - ``Role``: Enumeration of standard message roles (``system``, ``user``,
+     ``assistant``, ``tool``, etc.) used consistently by ``GrokMessage`` and
+     when constructing SDK messages.
 
-Examples
---------
-Basic text request with reasoning:
-    >>> messages = [{"role": "user", "content": "What is 101*3?"}]
-    >>> grok_input = GrokInput.from_list(messages)
-    >>> request = GrokRequest(
-    ...     model="grok-3-mini",
-    ...     input=grok_input,
-    ...     include_reasoning=True,
-    ...     reasoning_effort="medium",
-    ... )
-    >>> sdk_messages = request.to_sdk_messages()
+**Design principles**:
+- The request hierarchy ensures flexible input handling while preventing brittle
+  direct attribute access (all downstream code must use the public helper
+  methods on ``GrokRequest`` and ``GrokResponse``).
+- Input-side media saving now occurs at request time; response-side helpers
+  remain focused on output processing.
+- Streaming and batch support maintain full compatibility with the core
+  ``GrokClient.generate()`` and ``GrokClient`` batch methods.
 
-Batch of three requests:
-    >>> req1 = GrokRequest(
-    ...     model="grok-3-mini",
-    ...     input=GrokInput.from_list([{"role": "user", "content": "Hello"}]),
-    ... )
-    >>> req2 = GrokRequest(
-    ...     model="grok-3-mini",
-    ...     input=GrokInput.from_list([{"role": "user", "content": "Weather in Sydney?"}]),
-    ... )
-    >>> req3 = GrokRequest(
-    ...     model="grok-3-mini",
-    ...     input=GrokInput.from_list([{"role": "user", "content": "Explain Rust lifetimes"}]),
-    ... )
-    >>> batch = GrokBatchRequest(batch_name="demo-batch", requests=[req1, req2, req3])
-
-Streaming chunk example:
-    >>> async for chunk in await client.generate(request, stream=True):
-    ...     print(chunk.text, end="", flush=True)
-    ...     if chunk.is_final:
-    ...         print(f"\\nFinished: {chunk.finish_reason}")
+These models are the foundation for all Grok-specific functionality in the
+package. Application code should interact primarily with ``GrokRequest`` and
+``GrokResponse``; the lower-level models provide internal structure and
+extensibility.
 """
 
 from dataclasses import dataclass, field, replace
@@ -272,7 +274,39 @@ class GrokInput:
 
 @dataclass(frozen=True)
 class GrokRequest:
-    """Full native Grok request with multimodal, caching, and batch support."""
+    """Represents a request to the Grok API.
+
+    The model supports two input styles for maximum flexibility:
+    - Simple text: ``input="Explain prompt caching..."`` (most common)
+    - Structured messages: ``input=List[dict]`` or a messages container
+      (required for system prompts, multimodal content, etc.)
+
+    All downstream code (including persistence, media handling, and the XAI SDK
+    integration in GrokClient) MUST use the public helper methods rather than
+    accessing ``.input`` directly. This eliminates the previous design
+    inconsistency that caused AttributeError on string inputs.
+
+    **Public instance methods** (all pure and deterministic):
+        - ``to_sdk_messages()``: Returns normalised list of message dicts for
+          the XAI SDK (existing method – unchanged).
+        - ``get_messages() -> list[dict[str, Any]]``: Returns normalised
+          messages in the same format as ``to_sdk_messages()``. Always safe
+          for both simple ``str`` and complex input.
+        - ``extract_prompt_snippet(max_chars: int = 100) -> str``: Returns the
+          first 100 characters of the first user message (or joined text parts
+          for multimodal). Used for prompt_snippet in requests.meta.
+        - ``has_media() -> bool``: Returns True if any user message contains
+          images or files. Used to decide whether media-saving logic runs.
+
+    **Intended use**:
+        - Instantiate once per API call.
+        - Pass to ``GrokClient.generate(request, ...)``.
+        - Media files (input-side only) are now saved during ``_persist_request``
+          (not response time) to fail-fast and keep persistence concerns
+          logically separated.
+        - The ``save_mode="postgres"`` path in GrokClient relies on these
+          helpers for clean meta storage.
+    """
 
     model: str
     input: GrokInput = field(default_factory=GrokInput)
@@ -414,9 +448,41 @@ class GrokBatchRequest:
 
 @dataclass(frozen=True)
 class GrokResponse:
-    """Representation of a response from the xAI Grok API.
+    """Represents the response received from the Grok API.
 
-    Includes native reasoning trace extraction for both grok-3-mini and grok-4 families.
+    Created exclusively via the factory method ``from_dict()`` (which handles
+    raw SDK output, extracts reasoning traces, and validates required fields).
+
+    Provides symmetric helper methods to GrokRequest so that persistence,
+    logging, and downstream consumers never perform raw dict traversal.
+
+    **Public instance methods**:
+        - ``get_messages() -> list[dict[str, Any]]``: Returns assistant message(s)
+          (and optional reasoning messages) in normalised format.
+        - ``extract_response_snippet(max_chars: int = 200) -> str``: Returns a
+          truncated snippet of the main assistant content.
+        - ``get_reasoning_content(max_chars: int = 500) -> str | None``: Returns
+          the reasoning/thinking trace (when ``include_reasoning=True`` and
+          supported by the model).
+        - ``has_media() -> bool``: Always False for current text-only Grok
+          responses; implemented for future image-generation or file-output
+          capabilities.
+
+    **Factory method**:
+        - ``from_dict(cls, data: dict[str, Any]) -> GrokResponse``: Alternative
+          constructor that parses the raw API dictionary, extracts ``id``,
+          ``created_at``, ``model``, ``output``, ``usage``, ``status``, and
+          any reasoning trace. Raises ValueError on missing required fields.
+
+    **Intended use**:
+        - Inside ``GrokClient._persist_response(...)``: instantiate with
+          ``GrokResponse.from_dict(result)`` then call the helpers to populate
+          ``responses.meta``.
+        - Logging, auditing, or UI display layers should call the helpers
+          rather than accessing ``.raw``, ``.output``, or ``.reasoning_text``
+          directly.
+        - Keeps the persistence layer clean and makes future extensions
+          (e.g., when Grok returns generated media) trivial.
     """
 
     id: str
