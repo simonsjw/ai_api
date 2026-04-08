@@ -4,19 +4,19 @@
 │   │   ├── core
 │   │   │   ├── .mypy_cache
 │   │   │   ├── __pycache__
-│   │   │   ├── client.py
-│   │   │   ├── client.pyi
-│   │   │   ├── errors.py
-│   │   │   └── errors.pyi
+│   │   │   ├── xai
+│   │   │   │   ├── xai_batches.py
+│   │   │   │   ├── xai_errors.py
+│   │   │   │   ├── xai_media.py
+│   │   │   │   ├── xai_persistence.py
+│   │   │   │   └── xai_stream.py
+│   │   │   └── xai_client.py
 │   │   └── data_structures
 │   │       ├── .mypy_cache
+│   │       ├── __pycache__
 │   │       ├── db_responses_schema.py
 │   │       ├── db_responses_schema.pyi
-│   │       ├── grok.py
-│   │       ├── grok.pyi
-│   │       ├── __init__.py
-│   │       ├── ollama.py
-│   │       └── ollama.pyi
+│   │       └── xai_objects.py
 │   └── ai_api.egg-info
 │       ├── dependency_links.txt
 │       ├── PKG-INFO
@@ -26,12 +26,16 @@
 ├── tests
 │   ├── .mypy_cache
 │   ├── __pycache__
-│   ├── createLogTable.sql
-│   ├── createTestDB.sql
+│   ├── conftest.py
+│   ├── createTestDB_schema.sql
 │   ├── demo_reasoning.py
-│   └── demo_test.py
+│   ├── demo_test.py
+│   ├── initialise_dbtest.sh
+│   └── test_grok_client.py
+├── environment_grok.yml
 ├── .gitignore
+├── projectDirectoryMap.txt
 ├── pyproject.toml
 └── tree.txt
 
-12 directories, 23 files
+14 directories, 25 files
