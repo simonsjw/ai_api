@@ -10,7 +10,7 @@ keywords = ["LLM", "Grok", "Ollama", "async", "postgres", "streaming"]
 license = { text = "MIT License" }
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["python-dotenv", "asyncpg", "infopypg", "logger"]
+dependencies = ["pydantic>=2.0", "python-dotenv", "asyncpg", "infopypg", "logger"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.12",

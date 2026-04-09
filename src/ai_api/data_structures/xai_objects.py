@@ -56,14 +56,14 @@ Public exports (defined in ``__all__``):
      ``assistant``, ``tool``, etc.) used consistently by ``xAIMessage`` and
      when constructing SDK messages.
 
-**Design principles**:
-- The request hierarchy ensures flexible input handling while preventing brittle
-  direct attribute access (all downstream code must use the public helper
-  methods on ``xAIRequest`` and ``xAIResponse``).
-- Input-side media saving now occurs at request time; response-side helpers
-  remain focused on output processing.
-- Streaming and batch support maintain full compatibility with the core
-  ``xAIClient.generate()`` and ``xAIClient`` batch methods.
+5. **Design principles**:
+   - The request hierarchy ensures flexible input handling while preventing brittle
+     direct attribute access (all downstream code must use the public helper
+     methods on ``xAIRequest`` and ``xAIResponse``).
+   - Input-side media saving now occurs at request time; response-side helpers
+     remain focused on output processing.
+   - Streaming and batch support maintain full compatibility with the core
+     ``xAIClient.generate()`` and ``xAIClient`` batch methods.
 
 These models are the foundation for all xAI-specific functionality in the
 package. Application code should interact primarily with ``xAIRequest`` and
@@ -72,9 +72,11 @@ extensibility.
 """
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal, Protocol, Sequence, cast, runtime_checkable
+from typing import Any, Literal, Protocol, Sequence, Type, cast, runtime_checkable
 
-__all__ = [
+from pydantic import BaseModel
+
+__all__: list[str] = [
     "xAIMessage",
     "xAIInput",
     "xAIRequest",
@@ -85,10 +87,16 @@ __all__ = [
     "LLMStreamingChunkProtocol",
     "SaveMode",
     "Role",
+    "xAIJSONResponseSpec",
+    "JSON_INSTRUCTION",
 ]
 
 type SaveMode = Literal["none", "json_files", "postgres"]
 type Role = Literal["system", "user", "assistant", "developer"]
+
+# Required system-prompt substring that xAI expects when JSON mode is active.
+# The check is performed on the full content string (case-sensitive).
+JSON_INSTRUCTION: str = "Extract the requested information as structured JSON."
 
 
 @runtime_checkable
@@ -105,6 +113,45 @@ class LLMStreamingChunkProtocol(Protocol):
     def is_final(self) -> bool: ...
     @property
     def raw(self) -> dict[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class xAIJSONResponseSpec:
+    """Specification for enforcing JSON-structured responses.
+
+    Accepts either a Pydantic ``BaseModel`` subclass (recommended) or a raw
+    JSON-schema dictionary. When attached to an ``xAIRequest``, the underlying
+    xAI SDK automatically sets the appropriate ``response_format`` and the
+    request validator ensures the system prompt contains the required
+    instruction.
+
+    Parameters
+    ----------
+    model : type[BaseModel] | dict[str, Any] | None
+        Pydantic model class or raw JSON schema. ``None`` disables structured
+        output.
+    """
+
+    model: type[BaseModel] | dict[str, Any] | None = None
+
+    def to_sdk_response_format(self) -> dict[str, Any] | None:
+        """Convert the spec to the exact format expected by xAI SDK's
+        ``chat.create()`` (or ``responses`` endpoint).
+
+        Returns
+        -------
+        dict[str, Any] | None
+            SDK-ready ``response_format`` dict or ``None`` if no spec.
+        """
+        if self.model is None:
+            return None
+        if isinstance(self.model, dict):
+            # Raw schema supplied by caller
+            return {"type": "json_schema", "json_schema": self.model}
+        # Pydantic BaseModel -> SDK auto-converts (native support)
+        return self.model                                                                 # type: ignore[return-value]
+
+    # The xAI SDK handles BaseModel passthrough directly.
 
 
 @dataclass(frozen=True)
@@ -283,6 +330,11 @@ class xAIRequest:
     accessing ``.input`` directly. This eliminates the previous design
     inconsistency that caused AttributeError on string inputs.
 
+    When ``response_spec`` is supplied the request automatically:
+      1. Configures the SDK ``response_format``.
+      2. Validates that at least one system message contains the required
+         JSON-instruction string.
+
     **Public instance methods** (all pure and deterministic):
         - ``to_sdk_messages()``: Returns normalised list of message dicts for
           the XAI SDK (existing method – unchanged).
@@ -303,20 +355,80 @@ class xAIRequest:
           logically separated.
         - The ``save_mode="postgres"`` path in xAIClient relies on these
           helpers for clean meta storage.
+
+    Parameters
+    ----------
+    input : xAIInput | str
+        Prompt content (string or full message list).
+    model : str
+        xAI model identifier.
+    temperature : float
+        Sampling temperature (0.0–2.0).
+    top_p: float | None
+        The percentile to which to limit selection.
+    max_tokens : int | None
+        Maximum output tokens.
+    response_spec : xAIJSONResponseSpec | None
+        Structured-output specification (replaces old response_format).
+    include_reasoning : bool
+        Whether to return Grok reasoning trace.
+    reasoning_effort : Literal[str]
+        The reasoning effort to expend on a prompt.
+        This parameter is not supported by grok-4.20
+        In multi agent models, it selects the number agents to be used.
+    tools: list[dict]
+        Tools to be used by the model.
+    save_mode : SaveMode
+        Persistence behaviour.
+    prompt_cache_key : str | None
+        Optional key for prompt-caching server affinity.
+    batch_request_id: str | None
+
     """
 
+    input: "xAIInput" | str                                                               # forward ref
     model: str
-    input: xAIInput = field(default_factory=xAIInput)
     temperature: float | None = None
-    max_tokens: int | None = None
     top_p: float | None = None
+    logprobs: bool | None = None                                                          # not implemented
+    top_logprobs: int | None = None                                                       # not implemented
+    max_tokens: int | None = None
+    response_spec: xAIJSONResponseSpec | None = None
     include_reasoning: bool = False
     reasoning_effort: Literal["low", "medium", "high"] | None = None
     tools: list[dict[str, Any]] | None = None
-    response_format: dict[str, Any] | None = None
     save_mode: SaveMode = "none"
     prompt_cache_key: str | None = None
     batch_request_id: str | None = None
+
+    def __post_init__(self) -> None:
+        """Perform post-initialisation validation and automatic configuration.
+
+        If a response_spec is present we:
+          - set the internal SDK response_format (via helper)
+          - enforce the JSON-instruction in the system prompt.
+        """
+        # Inline comment: automatic JSON enforcement when spec supplied
+        if self.response_spec is not None:
+            self._validate_json_instruction_present()
+            # The helper below is called by to_chat_create_kwargs()
+
+    def _validate_json_instruction_present(self) -> None:
+        """Raise if no system message contains the required JSON instruction.
+
+        The check scans the rendered message list (case-sensitive substring).
+        """
+        messages: list[dict[str, Any]] = self.get_messages()                              # re-uses existing helper
+        instruction_found = any(
+            JSON_INSTRUCTION in msg["content"]
+            for msg in messages
+            if msg["role"] == "system" and isinstance(msg["content"], str)
+        )
+        if not instruction_found:
+            raise ValueError(
+                f"JSON response_spec supplied but no system message contains "
+                f"the required instruction: '{JSON_INSTRUCTION}'"
+            )
 
     def to_sdk_messages(self) -> list[dict[str, Any]]:
         """Native representation for xAI SDK chat.create / append.
@@ -368,18 +480,20 @@ class xAIRequest:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "store_messages": True,                                                       # Enables Responses API + prompt caching
+            "tools": self.tools,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "top_p": self.top_p,
+            "include_reasoning": self.include_reasoning,
+            "reasoning_effort": self.reasoning_effort,
         }
-        if self.tools is not None:
-            kwargs["tools"] = self.tools
-        if self.temperature is not None:
-            kwargs["temperature"] = self.temperature
-        if self.max_tokens is not None:
-            kwargs["max_tokens"] = self.max_tokens
-        if self.top_p is not None:
-            kwargs["top_p"] = self.top_p
-        if self.response_format is not None:
-            kwargs["response_format"] = self.response_format
-            # reasoning_effort is model-dependent; handled by caller check
+
+        # Automatic response_format when spec is present
+        if self.response_spec is not None:
+            fmt = self.response_spec.to_sdk_response_format()
+            if fmt is not None:
+                kwargs["response_format"] = fmt
+
         return kwargs
 
     def extract_prompt_snippet(self, max_chars: int = 100) -> str:
