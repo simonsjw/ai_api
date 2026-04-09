@@ -318,62 +318,86 @@ class xAIClient:
                 chat.append(user(content))                                                # SDK treats as continuation
 
     async def generate(
-        self, request: xAIRequest, stream: bool = False, **kwargs: Any
-    ) -> dict[str, Any] | AsyncIterator[LLMStreamingChunkProtocol]:
-        """Main generation entry point with full parameter forwarding.
+        self,
+        request: xAIRequest | str | list[xAIMessage],
+        stream: bool = False,
+        **kwargs: Any,
+    ) -> xAIResponse | AsyncIterator[LLMStreamingChunkProtocol]:
+        """Main entry point for chat completions using the xAI Responses API.
 
-        Persists request/response when requested, builds chat with all
-        xAIRequest fields (including tools), and returns native result.
+        When a response_spec is present on the request, the structured
+        output configuration (including response_format and system-prompt
+        validation) is automatically applied.
+
+        Parameters
+        ----------
+        request : xAIRequest | str | list[xAIMessage]
+            The request or prompt content.
+        stream : bool
+            Whether to return a streaming iterator.
+        **kwargs : Any
+            Additional arguments passed through to the underlying SDK call.
+
+        Returns
+        -------
+        xAIResponse | AsyncIterator[LLMStreamingChunkProtocol]
+            A completed response or streaming chunks.
         """
-        if request.include_reasoning and request.model not in REASONING_MODELS:
+        # Normalise input to a full xAIRequest
+        if isinstance(request, (str, list)):
+            req: xAIRequest = self.create_request(prompt=request)
+        else:
+            req = request
+
+        if req.include_reasoning and req.model not in REASONING_MODELS:
             self.logger.error(
                 "Unsupported thinking mode requested",
-                extra={"obj": {"model": request.model, "include_reasoning": True}},
+                extra={"obj": {"model": req.model, "include_reasoning": True}},
             )
             raise UnsupportedThinkingModeError(
-                f"Reasoning mode not supported for model {request.model}"
+                f"Reasoning mode not supported for model {req.model}"
             ) from None
 
         self.logger.info(
             "xAI generation started",
             extra={
                 "obj": {
-                    "model": request.model,
+                    "model": req.model,
                     "stream": stream,
-                    "cache_key": request.prompt_cache_key,
+                    "cache_key": req.prompt_cache_key,
                 }
             },
         )
 
         persist_info: dict | None = None
-        if request.save_mode == "postgres":
-            request_id, request_tstamp = await self._persist_request(request)
+        if req.save_mode == "postgres":
+            request_id, request_tstamp = await self._persist_request(req)
             persist_info = {"request_id": request_id, "request_tstamp": request_tstamp}
 
         try:
-            chat_kwargs = request.to_chat_create_kwargs()
+            chat_kwargs = req.to_chat_create_kwargs()
             chat = self._client.chat.create(**chat_kwargs)
-            await self._append_messages_to_chat(chat, request)
+            await self._append_messages_to_chat(chat, req)
 
             if stream:
                 result = (
-                    self._generate_stream_and_persist(chat, request, persist_info)
+                    self._generate_stream_and_persist(chat, req, persist_info)
                     if persist_info
-                    else self._xai_stream(chat, request)
+                    else self._xai_stream(chat, req)
                 )
             else:
-                result = await self._xai_generate(chat, request)
+                result = await self._xai_generate(chat, req)
                 if persist_info and isinstance(result, dict):
                     await self._persist_response(
                         persist_info["request_id"],
                         persist_info["request_tstamp"],
                         result,
-                        request,
+                        req,
                     )
 
             self.logger.info(
                 "xAI generation completed",
-                extra={"obj": {"save_mode": request.save_mode}},
+                extra={"obj": {"save_mode": req.save_mode}},
             )
             return result
 
@@ -402,7 +426,7 @@ class xAIClient:
 
             self.logger.error(
                 "Unexpected error during xAI generation",
-                extra={"obj": {"error": str(exc), "model": request.model}},
+                extra={"obj": {"error": str(exc), "model": req.model}},
             )
             raise wrap_xai_api_error(exc, "xAI API call failed") from exc
 
