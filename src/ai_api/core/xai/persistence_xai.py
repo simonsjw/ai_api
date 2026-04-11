@@ -62,11 +62,7 @@ SQL_SELECT_ALL_BATCH_REQUESTS: str = """
 
 
 class xAIPersistenceManager:
-    """Manages all PostgreSQL persistence for xAI requests/responses.
-
-    Fully compatible with your db_responses_schema.py (partitioned tables,
-    composite FKs, provider normalisation, JSONB meta fields).
-    """
+    """Manages all PostgreSQL persistence for xAI requests/responses."""
 
     def __init__(
         self,

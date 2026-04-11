@@ -17,6 +17,8 @@ from .common_xai import _generate_streaming
 from .errors_xai import wrap_infopypg_error, xAIClientError
 from .persistence_xai import xAIPersistenceManager
 
+__all__: list[str] = ["create_stream_chat"]
+
 
 async def create_stream_chat(
     client: BaseXAIClient,

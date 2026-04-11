@@ -29,7 +29,6 @@ from ...data_structures.xai_objects import (
     xAIRequest,
     xAIResponse,
 )
-from .batches_xai import *
 from .errors_xai import *
 from .persistence_xai import *
 from .stream_xai import *

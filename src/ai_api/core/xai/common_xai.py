@@ -9,6 +9,12 @@ from ...data_structures.xai_objects import xAIRequest
 from ..xai_client import BaseXAIClient                                                    # for type reference only
 from .errors_xai import wrap_xai_api_error, xAIAPIError, xAIClientError
 
+__all__: list[str] = [
+    "_build_endpoint",
+    "_generate_non_streaming",
+    "_generate_streaming",
+]
+
 
 def _build_endpoint(self, request: xAIRequest) -> dict[str, Any]:
     """Consistent endpoint metadata – now using the modern Responses API."""

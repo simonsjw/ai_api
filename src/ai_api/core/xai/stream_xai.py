@@ -22,7 +22,7 @@ from ...data_structures.xai_objects import (
     xAIRequest,
     xAIStreamingChunk,
 )
-from .xai_errors import wrap_grok_api_error
+from .errors_xai import wrap_xai_api_error
 
 __all__: list[str] = [
     "xai_stream",
@@ -46,7 +46,7 @@ async def xai_stream(
         self.logger.error(
             "Streaming generation failed", extra={"obj": {"error": str(exc)}}
         )
-        raise wrap_grok_api_error(exc, "Streaming generation failed") from exc
+        raise wrap_xai_api_error(exc, "Streaming generation failed") from exc
 
 
 async def generate_stream_and_persist(
@@ -60,7 +60,7 @@ async def generate_stream_and_persist(
     full_text: list[str] = []
     final_finish_reason: str | None = None
 
-    async for chunk in self._grok_stream(chat, request):
+    async for chunk in self._xai_stream(chat, request):
         yield chunk
         if chunk.text:
             full_text.append(chunk.text)
