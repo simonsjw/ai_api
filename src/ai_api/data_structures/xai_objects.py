@@ -135,23 +135,26 @@ class xAIJSONResponseSpec:
     model: type[BaseModel] | dict[str, Any] | None = None
 
     def to_sdk_response_format(self) -> dict[str, Any] | None:
-        """Convert the spec to the exact format expected by xAI SDK's
-        ``chat.create()`` (or ``responses`` endpoint).
-
-        Returns
-        -------
-        dict[str, Any] | None
-            SDK-ready ``response_format`` dict or ``None`` if no spec.
-        """
+        """Convert to the exact format expected by the xAI Responses API / OpenAI-compatible endpoint."""
         if self.model is None:
             return None
-        if isinstance(self.model, dict):
-            # Raw schema supplied by caller
-            return {"type": "json_schema", "json_schema": self.model}
-        # Pydantic BaseModel -> SDK auto-converts (native support)
-        return self.model                                                                 # type: ignore[return-value]
 
-    # The xAI SDK handles BaseModel passthrough directly.
+        if isinstance(self.model, dict):
+            schema = self.model
+            name = "structured_output"
+        else:
+            # Pydantic BaseModel → JSON schema (exact match to official SDK behaviour)
+            schema = self.model.model_json_schema()
+            name = getattr(self.model, "__name__", "structured_output")
+
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": name,
+                "schema": schema,
+                "strict": True,                                                           # Guarantees schema adherence (xAI supports this)
+            },
+        }
 
 
 @dataclass(frozen=True)
@@ -466,7 +469,7 @@ class xAIRequest:
         messages = list(self.to_sdk_messages())
         return messages
 
-    def to_chat_create_kwargs(self) -> dict[str, Any]:
+    def to_api_kwargs(self) -> dict[str, Any]:
         """Return keyword arguments for xAI SDK `chat.create()`.
 
         Centralises forwarding of all request parameters (tools, sampling
@@ -479,22 +482,22 @@ class xAIRequest:
         """
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "store_messages": True,                                                       # Enables Responses API + prompt caching
-            "tools": self.tools,
+            "input": self.get_messages(),                                                 # Responses API uses "input"
+            "store": True,                                                                # Default stateful behaviour
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "top_p": self.top_p,
+            "tools": self.tools,
             "include_reasoning": self.include_reasoning,
             "reasoning_effort": self.reasoning_effort,
         }
 
-        # Automatic response_format when spec is present
         if self.response_spec is not None:
             fmt = self.response_spec.to_sdk_response_format()
             if fmt is not None:
                 kwargs["response_format"] = fmt
 
-        return kwargs
+        return {k: v for k, v in kwargs.items() if v is not None}
 
     def extract_prompt_snippet(self, max_chars: int = 100) -> str:
         """Extract a truncated prompt snippet from the first user message.
@@ -643,7 +646,7 @@ class xAIResponse:
         raw = data.copy()
         try:
             response_id = str(data["id"])
-            created_at = int(data["created_at"])
+            created_at = int(data.get("created_at") or data.get("created", 0))
             model = str(data["model"])
         except (KeyError, TypeError) as exc:
             raise ValueError(
