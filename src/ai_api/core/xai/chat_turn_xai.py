@@ -4,9 +4,13 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
+from xai_sdk import AsyncClient
+from xai_sdk.chat import system, user                                                     # SDK message builders
+
 from ...data_structures.xai_objects import (                                              # exact path as provided
     SaveMode,
     xAIInput,
+    xAIJSONResponseSpec,
     xAIRequest,
     xAIResponse,
 )
@@ -15,95 +19,118 @@ from .common_xai import _generate_non_streaming
 from .errors_xai import wrap_infopypg_error, xAIClientError
 from .persistence_xai import xAIPersistenceManager
 
-__all__: list[str] = ["create_turn_chat"]
+__all__: list[str] = ["create_turn_chat_session"]
 
 
-async def create_turn_chat(
+async def create_turn_chat_session(
     client: BaseXAIClient,
+    sdk_client: AsyncClient,
     messages: list[dict[str, Any]],
-    model: str,
+    model: str = "grok-4",
     *,
+    response_model: xAIJSONResponseSpec | None = None,
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     top_p: Optional[float] = None,
     save_mode: SaveMode = "none",
     **kwargs: Any,
 ) -> xAIResponse:
-    """Create a standard turn-based (non-streaming) chat completion.
+    """Create a stateful turn-based chat completion using the official xAI SDK.
 
-    All logic is now expressed in terms of the official data structures
-    defined in data_structures/xai_objects.py.
+    This replaces the previous custom HTTP implementation. The SDK manages
+    conversation state internally via the returned chat object, which is attached
+    to the response for easy continuation in subsequent turns.
+
+    Args:
+        client: BaseXAIClient instance (provides logger and persistence manager).
+        sdk_client: The official AsyncClient from xai_sdk.
+        messages: Full conversation history (list of dicts with 'role' and 'content').
+        model: Model identifier (default: "grok-3").
+        temperature, max_tokens, top_p: Standard generation parameters.
+        save_mode: Persistence behaviour ("none" or "postgres").
+        **kwargs: Additional parameters passed through to the SDK chat.create().
+
+    Returns:
+        xAIResponse instance (identical contract to the previous implementation).
+        The response object also contains a private `_sdk_chat` attribute for
+        stateful continuation if the caller wishes to avoid rebuilding history.
     """
-    # 1. Build the canonical request object (mirrors your existing design)
-    xai_input = xAIInput.from_list(messages)
-    request = xAIRequest(
-        input=xai_input,
+    client.logger.info(
+        "Creating turn-based xAI chat (official SDK)",
+        extra={"model": model, "message_count": len(messages)},
+    )
+
+    # 1. Build xAIRequest (reuses all existing validation + response_spec logic)
+    xai_request = xAIRequest(
         model=model,
+        input=xAIInput.from_list(messages),
         temperature=temperature,
         max_tokens=max_tokens,
         top_p=top_p,
-        save_mode=save_mode,
-        **kwargs,
+        response_format=response_model,                                                   # your existing spec handling
+        **{k: v for k, v in kwargs.items() if k not in {"save_mode", "response_model"}},
     )
 
-    # 2. Prepare the exact kwargs expected by the xAI API
-    request_kwargs = request.to_api_kwargs()
-
+    # 2. Persist request BEFORE network call (unchanged contract)
     request_id: uuid.UUID | None = None
     request_tstamp: datetime | None = None
-
-    client.logger.info(
-        "Creating turn-based xAI chat",
-        extra={"obj": {"model": model, "save_mode": save_mode}},
-    )
-
-    # === PERSISTENCE: REQUEST (before API call) ===
     if save_mode == "postgres" and client.persistence_manager is not None:
         try:
             (
                 request_id,
                 request_tstamp,
-            ) = await client.persistence_manager.persist_request(request)
-        except Exception as exc:                                                          # persistence failure should not block the API call
-            client.logger.warning(
-                "Request persistence failed (continuing)",
-                extra={"obj": {"model": model, "error": str(exc)}},
-            )
-            # Still raise a wrapped error so the caller knows persistence failed
-            if isinstance(exc, Exception):
-                raise wrap_infopypg_error(exc, "Failed to persist request") from exc
-            request_id = request_tstamp = None
+            ) = await client.persistence_manager.persist_request(xai_request)
+        except Exception as exc:                                                          # noqa: BLE001
+            client.logger.error("Failed to persist request (non-fatal)", exc_info=True)
 
+            # 3. Create SDK chat using the new helper
+    chat_kwargs = xai_request.to_sdk_chat_kwargs()
+    chat = sdk_client.chat.create(**chat_kwargs)
+
+    # 4. Generate response
     try:
-        raw_response = await _generate_non_streaming(
-            client=client,
-            json_data=request_kwargs,
-            endpoint="/v1/responses",
-        )
+        sdk_response = await chat.sample()
+    except Exception as exc:
+        raise wrap_infopypg_error(
+            exc, "Failed to generate turn-based response via xAI SDK"
+        ) from exc
 
-        response = xAIResponse.from_dict(raw_response)
+    # 5. Convert and attach structured / stateful data
 
-        # === PERSISTENCE: RESPONSE (after successful call) ===
-        if (
-            save_mode == "postgres"
-            and client.persistence_manager is not None
-            and request_id is not None
-            and request_tstamp is not None
-        ):
+    if response_model is not None:
+        # First convert the raw SDK response (required for .parsed and ._sdk_chat)
+        response = xAIResponse.from_sdk(sdk_response)
+
+        # Now safely parse using the full xAIResponse object
+        parsed: xAIJSONResponseSpec = response_model.from_xai_response(response)
+        response.parsed = parsed
+    else:
+        # No structured model requested
+        response = xAIResponse.from_sdk(sdk_response)
+        parsed = None
+
+        # Attach the stateful SDK chat object for continuation
+    response._sdk_chat = chat
+
+    # 6. Persist response
+    if (
+        save_mode == "postgres"
+        and client.persistence_manager is not None
+        and request_id is not None
+        and request_tstamp is not None
+    ):
+        try:
             await client.persistence_manager.persist_response(
                 request_id=request_id,
                 request_tstamp=request_tstamp,
-                api_result=raw_response,
-                request=request,
+                api_result={"raw": sdk_response},
+                request=xai_request,
             )
+        except Exception as exc:                                                          # noqa: BLE001
+            client.logger.error("Failed to persist response (non-fatal)", exc_info=True)
 
-        client.logger.info(
-            "Turn-based chat completed successfully", extra={"obj": {"model": model}}
-        )
-        return response
-
-    except Exception as exc:
-        client.logger.error(
-            "Turn-based chat creation failed", extra={"obj": {"model": model}}
-        )
-        raise xAIClientError(f"Turn-based chat creation failed: {exc}") from exc
+    client.logger.info(
+        "Turn-based chat completed successfully (official SDK)",
+        extra={"response_id": getattr(sdk_response, "id", None)},
+    )
+    return response

@@ -71,10 +71,22 @@ package. Application code should interact primarily with ``xAIRequest`` and
 extensibility.
 """
 
+import time
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal, Protocol, Sequence, Type, cast, runtime_checkable
+from typing import (
+    Any,
+    Literal,
+    Protocol,
+    Sequence,
+    Type,
+    TypeVar,
+    cast,
+    runtime_checkable,
+)
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
+
+T = TypeVar("T", bound="xAIJSONResponseSpec")
 
 __all__: list[str] = [
     "xAIMessage",
@@ -93,6 +105,7 @@ __all__: list[str] = [
 
 type SaveMode = Literal["none", "json_files", "postgres"]
 type Role = Literal["system", "user", "assistant", "developer"]
+
 
 # Required system-prompt substring that xAI expects when JSON mode is active.
 # The check is performed on the full content string (case-sensitive).
@@ -116,7 +129,7 @@ class LLMStreamingChunkProtocol(Protocol):
 
 
 @dataclass(frozen=True)
-class xAIJSONResponseSpec:
+class xAIJSONResponseSpec(BaseModel):
     """Specification for enforcing JSON-structured responses.
 
     Accepts either a Pydantic ``BaseModel`` subclass (recommended) or a raw
@@ -133,6 +146,11 @@ class xAIJSONResponseSpec:
     """
 
     model: type[BaseModel] | dict[str, Any] | None = None
+
+    model_config = ConfigDict(
+        extra="forbid",                                                                   # optional: strict mode
+        arbitrary_types_allowed=True,
+    )
 
     def to_sdk_response_format(self) -> dict[str, Any] | None:
         """Convert to the exact format expected by the xAI Responses API / OpenAI-compatible endpoint."""
@@ -155,6 +173,28 @@ class xAIJSONResponseSpec:
                 "strict": True,                                                           # Guarantees schema adherence (xAI supports this)
             },
         }
+
+    @classmethod
+    def parse_json(cls: type[T], json_data: str | bytes | bytearray) -> T:
+        """Parse and validate JSON into an instance of this model.
+
+        This is the recommended, type-safe entry point.
+        """
+        return cls.model_validate_json(json_data)
+
+    @classmethod
+    def from_xai_response(
+        cls: type[T],
+        response: "xAIResponse | str",
+    ) -> T:
+        """Parse directly from an xAIResponse or raw JSON string."""
+        if isinstance(response, str):
+            json_data = response
+        else:
+            if not response.text:
+                raise ValueError("xAIResponse contains no text content to parse")
+            json_data = response.text
+        return cls.parse_json(json_data)
 
 
 @dataclass(frozen=True)
@@ -333,7 +373,7 @@ class xAIRequest:
     accessing ``.input`` directly. This eliminates the previous design
     inconsistency that caused AttributeError on string inputs.
 
-    When ``response_spec`` is supplied the request automatically:
+    When ``response_format`` is supplied the request automatically:
       1. Configures the SDK ``response_format``.
       2. Validates that at least one system message contains the required
          JSON-instruction string.
@@ -371,7 +411,7 @@ class xAIRequest:
         The percentile to which to limit selection.
     max_tokens : int | None
         Maximum output tokens.
-    response_spec : xAIJSONResponseSpec | None
+    response_format : xAIJSONResponseSpec | None
         Structured-output specification (replaces old response_format).
     include_reasoning : bool
         Whether to return Grok reasoning trace.
@@ -396,7 +436,7 @@ class xAIRequest:
     logprobs: bool | None = None                                                          # not implemented
     top_logprobs: int | None = None                                                       # not implemented
     max_tokens: int | None = None
-    response_spec: xAIJSONResponseSpec | None = None
+    response_format: xAIJSONResponseSpec | None = None
     include_reasoning: bool = False
     reasoning_effort: Literal["low", "medium", "high"] | None = None
     tools: list[dict[str, Any]] | None = None
@@ -407,12 +447,12 @@ class xAIRequest:
     def __post_init__(self) -> None:
         """Perform post-initialisation validation and automatic configuration.
 
-        If a response_spec is present we:
+        If a response_format is present we:
           - set the internal SDK response_format (via helper)
           - enforce the JSON-instruction in the system prompt.
         """
         # Inline comment: automatic JSON enforcement when spec supplied
-        if self.response_spec is not None:
+        if self.response_format is not None:
             self._validate_json_instruction_present()
             # The helper below is called by to_chat_create_kwargs()
 
@@ -429,7 +469,7 @@ class xAIRequest:
         )
         if not instruction_found:
             raise ValueError(
-                f"JSON response_spec supplied but no system message contains "
+                f"JSON response_format supplied but no system message contains "
                 f"the required instruction: '{JSON_INSTRUCTION}'"
             )
 
@@ -470,10 +510,8 @@ class xAIRequest:
         return messages
 
     def to_api_kwargs(self) -> dict[str, Any]:
-        """Return keyword arguments for xAI SDK `chat.create()`.
-
-        Centralises forwarding of all request parameters (tools, sampling
-        controls, etc.) for efficiency and single source of truth.
+        """Return keyword arguments for the xAI REST interface.
+        This interface supports different keys to the SDK to proceed with caution!
 
         Returns
         -------
@@ -492,10 +530,38 @@ class xAIRequest:
             "reasoning_effort": self.reasoning_effort,
         }
 
-        if self.response_spec is not None:
-            fmt = self.response_spec.to_sdk_response_format()
+        if self.response_format is not None:
+            fmt = self.response_format.to_sdk_response_format()
             if fmt is not None:
                 kwargs["response_format"] = fmt
+
+        return {k: v for k, v in kwargs.items() if v is not None}
+
+    def to_sdk_chat_kwargs(self) -> dict[str, Any]:
+        """Return keyword arguments for xAI SDK `chat.create()`.
+
+        Centralises forwarding of all request parameters (tools, sampling
+        controls, etc.) for efficiency and single source of truth.
+
+        Returns
+        -------
+        dict[str, Any]
+            Kwargs compatible with `AsyncClient.chat.create`.
+        """
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": self.to_sdk_messages(),                                           # SDK is distinct from the Responses API uses "input"
+            "store": True,                                                                # Default stateful behaviour
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "top_p": self.top_p,
+            "response_format": self.response_format.to_sdk_response_format()
+            if self.response_format
+            else None,
+            "tools": self.tools,
+            "include_reasoning": self.include_reasoning,
+            "reasoning_effort": self.reasoning_effort,
+        }
 
         return {k: v for k, v in kwargs.items() if v is not None}
 
@@ -607,6 +673,8 @@ class xAIResponse:
     status: Literal["completed", "in_progress", "incomplete"] | None = None
     raw: dict[str, Any] = field(default_factory=dict)
     reasoning_text: str | None = None
+    parsed: Any | None = None
+    _sdk_chat: Any | None = None
 
     @property
     def text(self) -> str:
@@ -636,6 +704,86 @@ class xAIResponse:
             ):
                 calls.append(item)
         return calls
+
+    @classmethod
+    def from_sdk(
+        cls,
+        sdk_response: Any,
+        *,
+        parsed: Any | None = None,
+        sdk_chat: Any | None = None,
+    ) -> "xAIResponse":
+        """Convert official xAI SDK chat response object to xAIResponse.
+
+        Maintains exact contract with existing code (persistence, .text property,
+        get_messages(), reasoning extraction, etc.).
+        """
+        # Extract core fields with safe fallbacks
+        response_id = str(getattr(sdk_response, "id", "unknown-id"))
+        created_at = int(
+            getattr(
+                sdk_response,
+                "created_at",
+                getattr(sdk_response, "created", int(time.time())),
+            )
+        )
+        model = str(getattr(sdk_response, "model", "grok-3"))
+
+        # Main content (SDK exposes .content directly)
+        content = getattr(sdk_response, "content", "")
+
+        # Reasoning trace (supported on certain models)
+        reasoning_text = getattr(sdk_response, "reasoning_content", None)
+        if reasoning_text is None:
+            # Fallback for proto-level reasoning
+            proto = getattr(sdk_response, "proto", None)
+            if proto and hasattr(proto, "reasoning_content"):
+                reasoning_text = getattr(proto, "reasoning_content", None)
+
+                # Build xAI-native output structure so .text and helper methods work unchanged
+        output: list[dict[str, Any]] = [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": content,
+                    }
+                ],
+            }
+        ]
+
+        # Usage – convert SDK Usage object (or Pydantic model) to plain dict
+        usage_raw = getattr(sdk_response, "usage", None)
+        if hasattr(usage_raw, "model_dump"):                                              # Pydantic v2 style
+            usage: dict[str, Any] | None = usage_raw.model_dump()
+        elif hasattr(usage_raw, "__dict__"):
+            usage = vars(usage_raw)
+        else:
+            usage = usage_raw if isinstance(usage_raw, dict) else None
+
+            # Status is always completed for a successful sample()
+        status: Literal["completed", "in_progress", "incomplete"] | None = "completed"
+
+        # Raw payload for debugging / auditing
+        raw_payload = {
+            "sdk_response": sdk_response,
+            "proto": getattr(sdk_response, "proto", None),
+        }
+
+        return cls(
+            id=response_id,
+            created_at=created_at,
+            model=model,
+            output=output,
+            usage=usage,
+            status=status,
+            raw=raw_payload,
+            reasoning_text=reasoning_text,
+            parsed=parsed,
+            _sdk_chat=sdk_chat,
+        )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "xAIResponse":

@@ -2,8 +2,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any, Literal, Optional, Type
 
-import httpx
-from xai_sdk import AsyncClient
+from xai_sdk import AsyncClient as XAIAsyncClient
 
 from ..data_structures.xai_objects import (
     LLMStreamingChunkProtocol,
@@ -14,7 +13,7 @@ from ..data_structures.xai_objects import (
 from .xai.chat_batch_xai import create_batch_chat
 from .xai.chat_multim_xai import create_multim_chat
 from .xai.chat_stream_xai import create_stream_chat
-from .xai.chat_turn_xai import create_turn_chat
+from .xai.chat_turn_xai import create_turn_chat_session
 from .xai.persistence_xai import xAIPersistenceManager
 from .xai.stream_xai import generate_stream_and_persist
 
@@ -39,11 +38,15 @@ class BaseXAIClient:
         self.timeout = timeout
         self.logger = logger
         self.persistence_manager = persistence_manager
-        self._http_client = httpx.AsyncClient(timeout=timeout, **kwargs)
+        self._http_client = None                                                          # retained only for non-turn modes
+        self._sdk_client: XAIAsyncClient | None = None
 
     async def aclose(self) -> None:
         """Explicitly close the underlying HTTP client."""
-        await self._http_client.aclose()
+        if self._http_client:
+            await self._http_client.aclose()
+        if self._sdk_client:
+            await self._sdk_client.aclose()
 
     async def __aenter__(self):
         """Support async context manager usage."""
@@ -57,17 +60,21 @@ class BaseXAIClient:
 class TurnXAIClient(BaseXAIClient):
     async def create_chat(
         self,
-        messages: list[dict],
-        model: str,
+        messages: list[dict] | None = None,
+        model: str = "grok-4",
         *,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
-        return await create_turn_chat(
+        """Create a stateful turn-based chat using the official xAI SDK."""
+        if self._sdk_client is None:
+            self._sdk_client = XAIAsyncClient(api_key=self.api_key)
+        return await create_turn_chat_session(
             self,
-            messages,
-            model,
+            self._sdk_client,
+            messages or [],
+            model=model,
             temperature=temperature,
             max_tokens=max_tokens,
             **kwargs,
@@ -84,7 +91,7 @@ class StreamXAIClient(BaseXAIClient):
     async def _get_sdk_client(self) -> AsyncClient:
         """Lazy-initialise the official xAI AsyncClient (shares auth with HTTP client)."""
         if self._sdk_client is None:
-            self._sdk_client = AsyncClient(api_key=self.api_key)
+            self._sdk_client = XAIAsyncClient(api_key=self.api_key)
         return self._sdk_client
 
     async def create_chat(
@@ -190,6 +197,7 @@ def XAIClient(
     while keeping the public API clean and uniform.
 
     Args:
+        logger: logging object
         api_key: xAI API key used for authentication.
         mode: Determines the chat interaction type and behaviour of `create_chat`.
             Must be one of: "turn", "stream", "batch", or "multim".
@@ -222,6 +230,7 @@ def XAIClient(
         )
 
     return ClientClass(
+        logger=logger,
         api_key=api_key,
         base_url=base_url,
         timeout=timeout,
