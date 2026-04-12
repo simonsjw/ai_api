@@ -1,13 +1,22 @@
 import logging
+from collections.abc import AsyncIterator
 from typing import Any, Literal, Optional, Type
 
 import httpx
+from xai_sdk import AsyncClient
 
+from ..data_structures.xai_objects import (
+    LLMStreamingChunkProtocol,
+    SaveMode,
+    xAIInput,
+    xAIRequest,
+)
 from .xai.chat_batch_xai import create_batch_chat
 from .xai.chat_multim_xai import create_multim_chat
 from .xai.chat_stream_xai import create_stream_chat
 from .xai.chat_turn_xai import create_turn_chat
 from .xai.persistence_xai import xAIPersistenceManager
+from .xai.stream_xai import generate_stream_and_persist
 
 ChatMode = Literal["turn", "stream", "batch", "multim"]
 
@@ -44,8 +53,6 @@ class BaseXAIClient:
         """Close the HTTP client on context exit."""
         await self.aclose()
 
-        # Specialised client classes (unchanged)
-
 
 class TurnXAIClient(BaseXAIClient):
     async def create_chat(
@@ -68,6 +75,18 @@ class TurnXAIClient(BaseXAIClient):
 
 
 class StreamXAIClient(BaseXAIClient):
+    """Streaming client using the official xAI SDK."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._sdk_client: AsyncClient | None = None
+
+    async def _get_sdk_client(self) -> AsyncClient:
+        """Lazy-initialise the official xAI AsyncClient (shares auth with HTTP client)."""
+        if self._sdk_client is None:
+            self._sdk_client = AsyncClient(api_key=self.api_key)
+        return self._sdk_client
+
     async def create_chat(
         self,
         messages: list[dict],
@@ -75,16 +94,39 @@ class StreamXAIClient(BaseXAIClient):
         *,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        save_mode: SaveMode = "none",
         **kwargs: Any,
-    ) -> Any:
-        return await create_stream_chat(
-            self,
-            messages,
-            model,
+    ) -> AsyncIterator[LLMStreamingChunkProtocol]:
+        """Create a streaming chat completion using the official xAI SDK.
+
+        Yields individual `LLMStreamingChunkProtocol` objects in real time.
+        If `save_mode="postgres"` the request is persisted before streaming
+        and the final accumulated response is persisted once at completion.
+        """
+        sdk_client = await self._get_sdk_client()
+
+        # Build canonical request object (reuses your existing models)
+        xai_input = xAIInput.from_list(messages)
+        request = xAIRequest(
+            input=xai_input,
+            model=model,
             temperature=temperature,
             max_tokens=max_tokens,
+            save_mode=save_mode,
             **kwargs,
         )
+
+        # Create SDK chat object (official pattern)
+        chat = sdk_client.chat.create(
+            model=request.model,
+            **request.to_api_kwargs(),                                                    # reuse your existing helper if it maps correctly
+        )
+
+        # Delegate to SDK streaming + single-final persistence
+        async for chunk in generate_stream_and_persist(
+            self, chat, request, save_mode=save_mode
+        ):
+            yield chunk
 
 
 class BatchXAIClient(BaseXAIClient):
