@@ -87,6 +87,8 @@ from typing import (
 )
 
 from pydantic import BaseModel, ConfigDict, Field
+from xai_sdk import AsyncClient as XAIAsyncClient
+from xai_sdk.chat import assistant, system, user
 
 T = TypeVar("T", bound="xAIJSONResponseSpec")
 
@@ -593,6 +595,44 @@ class xAIRequest(BaseModel):
                     return snippet[:max_chars]
         return ""                                                                         # fallback for empty / system-only prompts
 
+    def prepare_batch_chat(
+        self,
+        sdk_client: "XAIAsyncClient",
+        batch_request_id: str | None = None,
+    ) -> Any:
+        """Return an SDK-ready chat object for batch.add().
+
+        Uses your existing get_messages() for normalisation,
+        then safely converts each message dict to the SDK's typed helpers.
+        This eliminates the Pyrefly bad-argument-type and missing-attribute errors.
+        """
+        chat = sdk_client.chat.create(
+            **self.to_sdk_chat_kwargs(),
+            batch_request_id=batch_request_id or str(uuid.uuid4()),
+        )
+
+        for msg in self.get_messages():
+            role: str = msg.get("role", "user")
+            content = msg.get("content") or msg.get("text")
+
+            if content is None:
+                continue
+
+            # Guarantee str to satisfy SDK type requirements
+            content_str: str = str(content) if not isinstance(content, str) else content
+
+            if role == "system":
+                chat.append(system(content_str))
+            elif role == "user":
+                chat.append(user(content_str))
+            elif role == "assistant":
+                chat.append(assistant(content_str))
+            else:
+                # Safe fallback for any non-standard role
+                chat.append(user(f"[{role}] {content_str}"))
+
+        return chat
+
     def has_media(self) -> bool:
         """Return True if any user message contains multimodal content (images/files).
 
@@ -770,7 +810,8 @@ class xAIResponse(BaseModel):
     reasoning_text: str | None = None
 
     # These two fields are explicitly mutable so they can be supplied at construction
-    parsed: xAIJSONResponseSpec | None = Field(default=None, frozen=False)
+    parsed: BaseModel | dict[str, Any] | None = None
+    response_spec: xAIJSONResponseSpec | None = None
     sdk_chat: Any | None = Field(default=None, frozen=False)
 
     @property
@@ -992,6 +1033,10 @@ class xAIResponse(BaseModel):
         """
         # xAI-4 currently returns text-only output. Extend this method when needed.
         return False
+
+    def set_parsed(self, model_instance: BaseModel | dict[str, Any] | None) -> None:
+        """Assign the parsed model while satisfying the updated type."""
+        self.parsed = model_instance
 
 
 class xAIBatchResponse(BaseModel):

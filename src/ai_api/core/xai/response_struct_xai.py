@@ -63,21 +63,16 @@ async def generate_structured_json(
     else:
         req = request
 
-    spec = self.create_json_response_spec(response_model)
+    spec = xAIJSONResponseSpec(model=response_model)
     req = replace(req, response_spec=spec)
 
-    result = await self.generate(
-        req, stream=False, **{k: v for k, v in kwargs.items() if k != "stream"}
-    )
+    # Now uses SDK under the hood via to_sdk_chat_kwargs()
+    result = await self.generate(req, stream=False, **kwargs)
 
-    if not isinstance(result, xAIResponse):
-        raise TypeError("Expected non-streaming xAIResponse")
-
+    # SDK already enforces schema; your parsing step remains for attaching .parsed
     raw_response: xAIResponse = result
-    json_str: str = raw_response.text                                                     # robustly populated by xAIResponse
-
-    parsed = response_model.model_validate_json(json_str)
-    raw_response.parsed = parsed                                                          # type: ignore[attr-defined]
+    parsed = response_model.model_validate_json(raw_response.text)
+    raw_response.set_parsed(parsed)
 
     return raw_response
 

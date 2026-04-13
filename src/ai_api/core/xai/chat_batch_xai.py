@@ -15,6 +15,8 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
+from pydantic import BaseModel
+
 from ...data_structures.xai_objects import (
     SaveMode,
     xAIBatchRequest,
@@ -218,8 +220,8 @@ async def retrieve_batch_results(
 
         # === Structured output handling (validated_model = response.parsed) ===
         for idx, response in enumerate(completed_batch.results):
-            if response.parsed is not None:
-                validated_model: "xAIJSONResponseSpec" = response.parsed
+            if isinstance(response.parsed, BaseModel):
+                validated_model: BaseModel = response.parsed
                 client.logger.info(
                     "Processed structured batch result",
                     extra={

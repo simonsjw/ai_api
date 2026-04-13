@@ -41,20 +41,16 @@ class BaseXAIClient:
         self._http_client = None                                                          # retained only for non-turn modes
         self._sdk_client: XAIAsyncClient | None = None
 
+    async def _get_sdk_client(self) -> XAIAsyncClient:
+        if self._sdk_client is None:
+            self._sdk_client = XAIAsyncClient(
+                api_key=self.api_key
+            )                                                                             # SDK handles base_url, timeouts, retries
+        return self._sdk_client
+
     async def aclose(self) -> None:
-        """Explicitly close the underlying HTTP client."""
-        if self._http_client:
-            await self._http_client.aclose()
-        if self._sdk_client:
-            await self._sdk_client.aclose()
-
-    async def __aenter__(self):
-        """Support async context manager usage."""
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Close the HTTP client on context exit."""
-        await self.aclose()
+        # SDK clients are lightweight; no explicit close required in most cases
+        pass
 
 
 class TurnXAIClient(BaseXAIClient):
@@ -112,7 +108,7 @@ class StreamXAIClient(BaseXAIClient):
         """
         sdk_client = await self._get_sdk_client()
 
-        # Build canonical request object (reuses your existing models)
+        # Build canonical request object (reuses existing models)
         xai_input = xAIInput.from_list(messages)
         request = xAIRequest(
             input=xai_input,
@@ -129,9 +125,9 @@ class StreamXAIClient(BaseXAIClient):
             **request.to_api_kwargs(),                                                    # reuse your existing helper if it maps correctly
         )
 
-        # Delegate to SDK streaming + single-final persistence
+        # Delegate to updated generate_stream_and_persist (now SDK-based)
         async for chunk in generate_stream_and_persist(
-            self, chat, request, save_mode=save_mode
+            sdk_client, chat, request, save_mode=save_mode
         ):
             yield chunk
 
