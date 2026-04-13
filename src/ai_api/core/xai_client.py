@@ -1,3 +1,16 @@
+"""
+High-level asynchronous client for the xAI API using the official xAI SDK.
+
+This module provides the ``XAIClient`` factory function, which returns a
+specialised async client instance tailored to the requested chat mode
+("turn", "stream", "batch", or "multimodal"). The implementation leverages
+the official ``xai_sdk`` package (particularly ``AsyncClient`` for streaming)
+while exposing a uniform ``create_chat()`` interface across all modes.
+
+Persistence, streaming, and batch operations are delegated to dedicated
+helper modules under ``.xai`` for clean separation of concerns.
+"""
+
 import logging
 from collections.abc import AsyncIterator
 from typing import Any, Literal, Optional, Type
@@ -78,7 +91,11 @@ class TurnXAIClient(BaseXAIClient):
 
 
 class StreamXAIClient(BaseXAIClient):
-    """Streaming client using the official xAI SDK."""
+    """Streaming XAI client built directly on the official xAI SDK (`xai_sdk.AsyncClient`).
+
+    Uses lazy initialisation of the SDK client and delegates real-time token
+    streaming (combined with optional persistence) to ``generate_stream_and_persist``.
+    """
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -183,29 +200,28 @@ def XAIClient(
     **kwargs: Any,
 ) -> BaseXAIClient:
     """Factory function that creates and returns a specialised xAI client
-    for the requested interaction mode.
+    for the requested interaction mode using the official xAI SDK.
 
-    This is the primary public entry point to the xAI API library.
-    It returns a client instance with a consistent `create_chat(...)`
-    interface regardless of the underlying chat modality.
+    This is the primary public entry point to the xAI API library. It returns a
+    client instance with a consistent ``create_chat(...)`` interface regardless
+    of the underlying chat modality.
 
-    The `mode` parameter selects the appropriate specialised implementation
-    while keeping the public API clean and uniform.
+    The ``mode`` parameter selects the appropriate specialised implementation
+    while ensuring seamless integration with ``xai_sdk.AsyncClient``.
 
     Args:
-        logger: logging object
         api_key: xAI API key used for authentication.
-        mode: Determines the chat interaction type and behaviour of `create_chat`.
+        mode: Determines the chat interaction type and behaviour of ``create_chat``.
             Must be one of: "turn", "stream", "batch", or "multim".
             Defaults to "turn" (standard non-streaming chat).
         base_url: Base URL for the xAI API service.
         timeout: Default HTTP request timeout in seconds.
-        **kwargs: Additional arguments passed directly to `httpx.AsyncClient`.
+        **kwargs: Additional arguments passed directly to ``httpx.AsyncClient``.
 
     Returns:
-        An instance of the appropriate client subclass (TurnXAIClient,
-        StreamXAIClient, etc.) which supports async context management
-        and provides `create_chat`.
+        An instance of the appropriate client subclass (``TurnXAIClient``,
+        ``StreamXAIClient``, etc.) which supports async context management
+        and provides ``create_chat``.
 
     Example:
         >>> client = XAIClient(api_key="xai-...", mode="stream")

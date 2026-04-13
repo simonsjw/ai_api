@@ -1,74 +1,32 @@
 """
-xAI API data models for the ai_api package.
+xAI SDK data models for the ai_api package.
 
-This module defines the complete, type-safe set of data structures required to
-interact with the xAI API. It provides a clean abstraction layer for both
-single-request and batch operations, streaming responses, persistence
-configuration, and message construction.
+This module defines clean, type-safe dataclasses and Pydantic models that map
+directly to the official xAI Python SDK (`xai_sdk`). These structures serve as
+the canonical abstraction layer for constructing requests, handling responses,
+and configuring features such as structured JSON output, multimodal content,
+and streaming.
 
-All public classes, protocols, and enumerations are exported via ``__all__``
-and are designed to work seamlessly with ``xAIClient`` (the primary entry point
-in ``core/grok_client.py``).
+All public classes and helpers translate seamlessly into the parameters and
+objects expected by `xai_sdk.AsyncClient.chat.create()` (and related methods)
+via dedicated conversion methods (e.g., `to_api_kwargs()`, `to_sdk_response_format()`).
 
-Public exports (defined in ``__all__``):
+Public exports (via ``__all__``) include:
 
-1. **Request Hierarchy** (xAIMessage → xAIInput → xAIRequest)
-   - ``xAIMessage``: The fundamental building block of a conversation. It
-     represents a single message with a ``role`` (from the ``Role`` enum) and
-     ``content`` (text or multimodal parts).
-   - ``xAIInput``: A flexible container that accepts either a simple ``str``
-     (for quick text-only prompts) or a list of ``xAIMessage`` objects (for
-     system prompts, multimodal content, tools, etc.).
-   - ``xAIRequest``: The top-level request model. It composes a ``xAIInput``
-     (or simple string) with API parameters (``model``, ``temperature``,
-     ``max_tokens``, ``include_reasoning``, etc.) and configuration options
-     such as ``save_mode`` and ``prompt_cache_key``. All calls to
-     ``xAIClient.generate()`` begin with a ``xAIRequest``.
+- **Request models**: ``xAIMessage``, ``xAIInput``, ``xAIRequest``
+- **Structured output**: ``xAIJSONResponseSpec``
+- **Batch support**: ``xAIBatchRequest``, ``xAIBatchResponse``
+- **Streaming & protocol**: ``xAIStreamingChunk``, ``LLMStreamingChunkProtocol``
+- **Supporting types**: ``SaveMode``, ``Role``
 
-2. **Batch Processing**
-   - ``xAIBatchRequest``: Groups multiple ``xAIRequest`` objects into a single
-     batch submission. It reduces API overhead and cost when processing many
-     prompts together and provides batch-level metadata (``batch_id``,
-     ``batch_index``, etc.).
-   - ``xAIBatchResponse``: The corresponding response object that aggregates
-     the individual results of each request in a completed batch.
+Design principles:
+- Full compatibility with the xAI Responses API / OpenAI-compatible endpoint.
+- Direct support for the official SDK client patterns.
+- Immutable, validated data structures with helper methods for safe usage.
+- Extensible persistence configuration via ``SaveMode``.
 
-3. **Response and Streaming Models**
-   - ``xAIResponse``: Represents a single successful response from the xAI
-     API. It is instantiated exclusively via the factory method
-     ``xAIResponse.from_dict()`` and provides symmetric helper methods to
-     ``xAIRequest`` (``get_messages()``, ``extract_response_snippet()``,
-     ``get_reasoning_content()``, ``has_media()``).
-   - ``xAIStreamingChunk``: Concrete implementation of a single chunk of
-     streamed output received during a streaming generation.
-   - ``LLMStreamingChunkProtocol``: A structural Protocol (using ``typing.Protocol``)
-     that ``xAIStreamingChunk`` implements. It defines the common interface
-     expected by streaming consumers across different LLM providers in the
-     ``ai_api`` package, enabling polymorphic handling of streaming results.
-
-4. **Supporting Types**
-   - ``SaveMode``: Enumeration that controls persistence behaviour for a
-     request/response pair. Valid values are typically ``"none"`` (no
-     persistence) and ``"postgres"`` (full request and response logging to the
-     PostgreSQL database via ``_persist_request()`` and ``_persist_response()``
-     in ``xAIClient``).
-   - ``Role``: Enumeration of standard message roles (``system``, ``user``,
-     ``assistant``, ``tool``, etc.) used consistently by ``xAIMessage`` and
-     when constructing SDK messages.
-
-5. **Design principles**:
-   - The request hierarchy ensures flexible input handling while preventing brittle
-     direct attribute access (all downstream code must use the public helper
-     methods on ``xAIRequest`` and ``xAIResponse``).
-   - Input-side media saving now occurs at request time; response-side helpers
-     remain focused on output processing.
-   - Streaming and batch support maintain full compatibility with the core
-     ``xAIClient.generate()`` and ``xAIClient`` batch methods.
-
-These models are the foundation for all xAI-specific functionality in the
-package. Application code should interact primarily with ``xAIRequest`` and
-``xAIResponse``; the lower-level models provide internal structure and
-extensibility.
+Application code interacts primarily with ``xAIRequest`` and ``xAIResponse``
+while the lower-level models ensure correct mapping to the xAI SDK.
 """
 
 import time
