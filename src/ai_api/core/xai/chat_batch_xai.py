@@ -20,6 +20,7 @@ from ...data_structures.xai_objects import (
     xAIBatchRequest,
     xAIBatchResponse,
     xAIInput,
+    xAIJSONResponseSpec,
     xAIRequest,
 )
 from ..xai_client import BaseXAIClient
@@ -35,6 +36,7 @@ async def create_batch_chat(
     messages: list[dict[str, Any]],
     model: str,
     *,
+    response_model: type["xAIJSONResponseSpec"] | None = None,                            # <-- NEW
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     top_p: Optional[float] = None,
@@ -67,6 +69,7 @@ async def create_batch_chat(
     request = xAIRequest(
         input=xai_input,
         model=model,
+        response_model=response_model,
         temperature=temperature,
         max_tokens=max_tokens,
         top_p=top_p,
@@ -162,3 +165,89 @@ async def create_batch_chat(
             },
         )
         raise xAIClientBatchError(f"Batch chat creation failed: {exc}") from exc
+
+
+async def retrieve_batch_results(
+    client: BaseXAIClient,
+    batch_id: str,
+    response_model: type["xAIJSONResponseSpec"] | None = None,
+) -> xAIBatchResponse:
+    """Retrieve a completed xAI batch job and return a fully wrapped xAIBatchResponse.
+
+    Each item in .results is an xAIResponse instance, so .parsed (structured output)
+    is available immediately when response_model was supplied at creation time.
+    """
+    client.logger.info(
+        "Retrieving xAI batch results",
+        extra={
+            "obj": {
+                "batch_id": batch_id,
+                "response_model": response_model.__name__ if response_model else None,
+            }
+        },
+    )
+
+    try:
+        # Fetch raw batch status and results via the existing non-streaming helper
+        batch_raw = await _generate_non_streaming(
+            client=client,
+            endpoint=f"/v1/batches/{batch_id}",                                           # no json_data since GET requests send no body.
+        )
+
+        # Use the canonical factory – automatically wraps every result
+        # using xAIResponse.from_dict / from_sdk
+        completed_batch: xAIBatchResponse = xAIBatchResponse.from_dict(batch_raw)
+
+        # Optional: update status in the wrapper if the API reports it
+        if completed_batch.status is None:
+            completed_batch = completed_batch.model_copy(
+                update={"status": batch_raw.get("status")}
+            )
+
+        client.logger.info(
+            "Batch results retrieved successfully",
+            extra={
+                "obj": {
+                    "batch_id": completed_batch.batch_id,
+                    "name": completed_batch.name,
+                    "status": completed_batch.status,
+                    "result_count": len(completed_batch.results),
+                }
+            },
+        )
+
+        # === Structured output handling (validated_model = response.parsed) ===
+        for idx, response in enumerate(completed_batch.results):
+            if response.parsed is not None:
+                validated_model: "xAIJSONResponseSpec" = response.parsed
+                client.logger.info(
+                    "Processed structured batch result",
+                    extra={
+                        "obj": {
+                            "batch_id": completed_batch.batch_id,
+                            "index": idx,
+                            "model": type(validated_model).__name__,
+                        }
+                    },
+                )
+                # Example: persist the validated model (extend persistence_xai.py as needed)
+                # await client.persistence_manager._persist_validated_model(
+                #     batch_id=completed_batch.batch_id, index=idx, model=validated_model
+                # )
+            else:
+                # Non-structured or fallback result
+                client.logger.debug(
+                    "Non-structured batch result",
+                    extra={"obj": {"batch_id": completed_batch.batch_id, "index": idx}},
+                )
+
+        return completed_batch
+
+    except Exception as exc:
+        client.logger.error(
+            "Batch results retrieval failed",
+            extra={"obj": {"batch_id": batch_id}},
+        )
+        raise xAIClientBatchError(
+            f"Failed to retrieve batch {batch_id}: {exc}"
+        ) from exc

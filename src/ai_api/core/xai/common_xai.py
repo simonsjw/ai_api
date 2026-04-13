@@ -29,7 +29,7 @@ def _build_endpoint(self, request: xAIRequest) -> dict[str, Any]:
 
 async def _generate_non_streaming(
     client: BaseXAIClient,
-    json_data: dict[str, Any],
+    json_data: dict[str, Any] | None = None,
     endpoint: str = "/v1/responses",
 ) -> dict[str, Any]:
     """Non-streaming (turn, batch, multimodal) HTTP POST to the xAI Responses API."""
@@ -39,9 +39,14 @@ async def _generate_non_streaming(
         "Content-Type": "application/json",
     }
 
+    if json_data:
+        model_obj = json_data.get("model")
+    else:
+        model_obj = "GET ONLY - no data sent."
+
     client.logger.debug(
         "xAI non-streaming request initiated",
-        extra={"obj": {"endpoint": endpoint, "model": json_data.get("model")}},
+        extra={"obj": {"endpoint": endpoint, "model": model_obj}},
     )
 
     try:

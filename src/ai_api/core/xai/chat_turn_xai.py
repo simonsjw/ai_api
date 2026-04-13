@@ -96,23 +96,18 @@ async def create_turn_chat_session(
         ) from exc
 
     # 5. Convert and attach structured / stateful data
-
     if response_model is not None:
-        # First convert the raw SDK response (required for .parsed and ._sdk_chat)
-        response = xAIResponse.from_sdk(sdk_response)
-
-        # Now safely parse using the full xAIResponse object
-        parsed: xAIJSONResponseSpec = response_model.from_xai_response(response)
-        response.parsed = parsed
+        response_raw: xAIResponse = xAIResponse.from_sdk(sdk_response)                    # temporary
+        parsed: xAIJSONResponseSpec = response_model.from_xai_response(response_raw)
+        response = xAIResponse.from_sdk(                                                  # final immutable instance
+            sdk_response=sdk_response, parsed=parsed, sdk_chat=chat
+        )
     else:
-        # No structured model requested
-        response = xAIResponse.from_sdk(sdk_response)
-        parsed = None
+        response = xAIResponse.from_sdk(
+            sdk_response=sdk_response, parsed=None, sdk_chat=chat
+        )
 
-        # Attach the stateful SDK chat object for continuation
-    response._sdk_chat = chat
-
-    # 6. Persist response
+        # 6. Persist response
     if (
         save_mode == "postgres"
         and client.persistence_manager is not None

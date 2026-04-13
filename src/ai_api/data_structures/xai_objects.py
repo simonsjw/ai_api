@@ -72,7 +72,9 @@ extensibility.
 """
 
 import time
+import uuid
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import (
     Any,
     Literal,
@@ -84,7 +86,7 @@ from typing import (
     runtime_checkable,
 )
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 T = TypeVar("T", bound="xAIJSONResponseSpec")
 
@@ -360,7 +362,7 @@ class xAIInput:
 
 
 @dataclass(frozen=True)
-class xAIRequest:
+class xAIRequest(BaseModel):
     """Represents a request to the xAI API.
 
     The model supports two input styles for maximum flexibility:
@@ -443,6 +445,7 @@ class xAIRequest:
     save_mode: SaveMode = "none"
     prompt_cache_key: str | None = None
     batch_request_id: str | None = None
+    model_config = ConfigDict(frozen=True)
 
     def __post_init__(self) -> None:
         """Perform post-initialisation validation and automatic configuration.
@@ -614,20 +617,112 @@ class xAIRequest:
         return replace(self, **updates)
 
 
+class xAIBatchRequest(BaseModel):
+    """Immutable wrapper around one or more xAIRequest objects for batch submission.
+
+    Provides complete symmetry with xAIBatchResponse while reusing all validation,
+    helper methods, and factory logic already present on xAIRequest.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    batch_id: str
+    name: str | None = None
+    created_at: int | None = None
+    status: Literal["draft", "in_progress", "submitted"] | None = None
+    requests: Sequence["xAIRequest"] = Field(default_factory=list)
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def from_requests(
+        cls,
+        requests: Sequence["xAIRequest"] | list["xAIRequest"],
+        batch_id: str | None = None,
+        name: str | None = None,
+    ) -> "xAIBatchRequest":
+        """Convenience factory for constructing a multi-request batch from
+        existing xAIRequest instances (recommended for true multi-request use cases).
+        """
+        import uuid                                                                       # local import to avoid polluting module namespace
+
+        if batch_id is None:
+            batch_id = f"batch-{uuid.uuid4().hex[:12]}"
+
+        return cls(
+            batch_id=batch_id,
+            name=name or f"batch-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+            status="draft",
+            requests=list(requests),
+            raw={
+                "requests": [
+                    r.model_dump() if hasattr(r, "model_dump") else dict(r)
+                    for r in requests
+                ]
+            },
+        )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "xAIBatchRequest":
+        """Create from a raw dictionary (e.g. persistence layer or API response).
+
+        Automatically wraps each request item using xAIRequest.from_dict()
+        so that full validation and helper methods remain available.
+        """
+        raw_requests = data.get("requests", []) or data.get("batch_requests", [])
+
+        wrapped_requests: list["xAIRequest"] = []
+        for item in raw_requests:
+            if isinstance(item, dict):
+                # Reuse the existing from_dict on xAIRequest (preferred)
+                wrapped_requests.append(xAIRequest.from_dict(item))
+            elif hasattr(item, "model_dump"):                                             # already a Pydantic model
+                wrapped_requests.append(item)
+            else:
+                # Fallback for other raw objects
+                wrapped_requests.append(xAIRequest.from_dict(dict(item)))
+
+        return cls(
+            batch_id=str(data.get("id") or data.get("batch_id", "unknown")),
+            name=data.get("name") or data.get("batch_name"),
+            created_at=data.get("created_at"),
+            status=data.get("status"),
+            requests=wrapped_requests,
+            raw=data,
+        )
+
+    @classmethod
+    def from_sdk(cls, sdk_batch_request: Any) -> "xAIBatchRequest":
+        """Create directly from an official xAI SDK batch-request object."""
+        if hasattr(sdk_batch_request, "model_dump"):
+            raw_data = sdk_batch_request.model_dump()
+        else:
+            raw_data = (
+                vars(sdk_batch_request)
+                if hasattr(sdk_batch_request, "__dict__")
+                else dict(sdk_batch_request)
+            )
+        return cls.from_dict(raw_data)
+
+    def to_batch_payload(self) -> dict[str, Any]:
+        """Generate the exact payload required by the xAI endpoint
+        /v1/batches/{batch_id}/requests.
+        """
+        batch_requests = []
+        for req in self.requests:
+            payload = (
+                req.to_api_kwargs() if hasattr(req, "to_api_kwargs") else dict(req)
+            )
+            batch_requests.append(
+                {
+                    "batch_request_id": str(uuid.uuid4()),
+                    "batch_request": payload,
+                }
+            )
+        return {"batch_requests": batch_requests}
+
+
 @dataclass(frozen=True)
-class xAIBatchRequest:
-    """Container for a batch of xAIRequests (used by client.batch.add)."""
-
-    batch_name: str
-    requests: list[xAIRequest] = field(default_factory=list)
-
-    def to_sdk_batch_requests(self) -> list[Any]:
-        """Will be converted by client to xAI SDK prepared objects."""
-        return self.requests
-
-
-@dataclass(frozen=True)
-class xAIResponse:
+class xAIResponse(BaseModel):
     """Represents the response received from the xAI API.
 
     Created exclusively via the factory method ``from_dict()`` (which handles
@@ -673,8 +768,10 @@ class xAIResponse:
     status: Literal["completed", "in_progress", "incomplete"] | None = None
     raw: dict[str, Any] = field(default_factory=dict)
     reasoning_text: str | None = None
-    parsed: Any | None = None
-    _sdk_chat: Any | None = None
+
+    # These two fields are explicitly mutable so they can be supplied at construction
+    parsed: xAIJSONResponseSpec | None = Field(default=None, frozen=False)
+    sdk_chat: Any | None = Field(default=None, frozen=False)
 
     @property
     def text(self) -> str:
@@ -710,15 +807,11 @@ class xAIResponse:
         cls,
         sdk_response: Any,
         *,
-        parsed: Any | None = None,
+        parsed: xAIJSONResponseSpec | None = None,
         sdk_chat: Any | None = None,
     ) -> "xAIResponse":
-        """Convert official xAI SDK chat response object to xAIResponse.
-
-        Maintains exact contract with existing code (persistence, .text property,
-        get_messages(), reasoning extraction, etc.).
-        """
-        # Extract core fields with safe fallbacks
+        """Convert official xAI SDK chat response object to xAIResponse."""
+        # (Your existing extraction logic – no changes needed here)
         response_id = str(getattr(sdk_response, "id", "unknown-id"))
         created_at = int(
             getattr(
@@ -729,49 +822,37 @@ class xAIResponse:
         )
         model = str(getattr(sdk_response, "model", "grok-3"))
 
-        # Main content (SDK exposes .content directly)
         content = getattr(sdk_response, "content", "")
-
-        # Reasoning trace (supported on certain models)
         reasoning_text = getattr(sdk_response, "reasoning_content", None)
         if reasoning_text is None:
-            # Fallback for proto-level reasoning
             proto = getattr(sdk_response, "proto", None)
             if proto and hasattr(proto, "reasoning_content"):
                 reasoning_text = getattr(proto, "reasoning_content", None)
 
-                # Build xAI-native output structure so .text and helper methods work unchanged
         output: list[dict[str, Any]] = [
             {
                 "type": "message",
                 "role": "assistant",
-                "content": [
-                    {
-                        "type": "output_text",
-                        "text": content,
-                    }
-                ],
+                "content": [{"type": "output_text", "text": content}],
             }
         ]
 
-        # Usage – convert SDK Usage object (or Pydantic model) to plain dict
         usage_raw = getattr(sdk_response, "usage", None)
-        if hasattr(usage_raw, "model_dump"):                                              # Pydantic v2 style
+        if hasattr(usage_raw, "model_dump"):
             usage: dict[str, Any] | None = usage_raw.model_dump()
         elif hasattr(usage_raw, "__dict__"):
             usage = vars(usage_raw)
         else:
             usage = usage_raw if isinstance(usage_raw, dict) else None
 
-            # Status is always completed for a successful sample()
         status: Literal["completed", "in_progress", "incomplete"] | None = "completed"
 
-        # Raw payload for debugging / auditing
         raw_payload = {
             "sdk_response": sdk_response,
             "proto": getattr(sdk_response, "proto", None),
         }
 
+        # All fields are now passed at construction time – no post-init assignments
         return cls(
             id=response_id,
             created_at=created_at,
@@ -782,7 +863,7 @@ class xAIResponse:
             raw=raw_payload,
             reasoning_text=reasoning_text,
             parsed=parsed,
-            _sdk_chat=sdk_chat,
+            sdk_chat=sdk_chat,
         )
 
     @classmethod
@@ -913,20 +994,62 @@ class xAIResponse:
         return False
 
 
-@dataclass(frozen=True)
-class xAIBatchResponse:
-    """Immutable representation of a completed xAI batch result."""
+class xAIBatchResponse(BaseModel):
+    """Immutable representation of a completed (or in-progress) xAI batch result.
+
+    Designed as a wrapper around a sequence of xAIResponse objects so that
+    downstream code can directly access .parsed, .text, .tool_calls, etc.
+    """
+
+    model_config = ConfigDict(frozen=True)
 
     batch_id: str
-    results: tuple[dict[str, Any], ...]
+    name: str | None = None
+    created_at: int | None = None
+    status: Literal["completed", "in_progress", "failed", "cancelled"] | None = None
+    results: Sequence["xAIResponse"] = Field(default_factory=list)
+    raw: dict[str, Any] = Field(default_factory=dict)                                     # full raw payload for auditing
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "xAIBatchResponse":
-        """Create xAIBatchResponse from the raw /v1/batches/{id} response."""
+        """Create xAIBatchResponse from the raw /v1/batches/{id} response (or creation payload).
+
+        Automatically wraps each item in 'results' using xAIResponse.from_dict
+        so that .parsed (structured output) is available immediately.
+        """
+        raw_results = data.get("results", []) or data.get("output", []) or []
+
+        wrapped_results: list[xAIResponse] = []
+        for item in raw_results:
+            if isinstance(item, dict):
+                # Reuse the existing xAIResponse validation & helpers
+                wrapped_results.append(xAIResponse.from_dict(item))
+            elif hasattr(item, "model_dump"):                                             # already a Pydantic model
+                wrapped_results.append(item)
+            else:
+                # Fallback for SDK objects or other raw structures
+                wrapped_results.append(xAIResponse.from_sdk(item))
+
         return cls(
-            batch_id=str(data["id"]),
-            results=tuple(data.get("results", [])),
+            batch_id=str(data.get("id") or data.get("batch_id", "unknown")),
+            name=data.get("name"),
+            created_at=data.get("created_at"),
+            status=data.get("status"),
+            results=wrapped_results,
+            raw=data,
         )
+
+    @classmethod
+    def from_sdk(cls, sdk_batch: Any) -> "xAIBatchResponse":
+        """Preferred factory when working directly with the xAI SDK batch object."""
+        raw_data = (
+            sdk_batch.model_dump()
+            if hasattr(sdk_batch, "model_dump")
+            else vars(sdk_batch)
+            if hasattr(sdk_batch, "__dict__")
+            else dict(sdk_batch)
+        )
+        return cls.from_dict(raw_data)
 
 
 @dataclass(frozen=True)

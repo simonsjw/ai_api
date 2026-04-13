@@ -86,9 +86,9 @@ class StreamXAIClient(BaseXAIClient):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._sdk_client: AsyncClient | None = None
+        self._sdk_client: XAIAsyncClient | None = None
 
-    async def _get_sdk_client(self) -> AsyncClient:
+    async def _get_sdk_client(self) -> XAIAsyncClient:
         """Lazy-initialise the official xAI AsyncClient (shares auth with HTTP client)."""
         if self._sdk_client is None:
             self._sdk_client = XAIAsyncClient(api_key=self.api_key)
