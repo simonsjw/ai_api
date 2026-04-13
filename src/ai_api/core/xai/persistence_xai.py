@@ -2,15 +2,21 @@
 
 Full xAIPersistenceManager class assembled from your provided methods.
 Compatible with the Responses API endpoint and your DB schema.
+Now includes full multimodal media persistence.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import shutil
+import urllib.request
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+from urllib.error import URLError
 
 # infopypg imports
 from infopypg import (
@@ -29,7 +35,7 @@ from .errors_xai import (
 __all__: list[str] = ["xAIPersistenceManager"]
 
 # ------------------------------------------------------------------
-# SQL constants
+# SQL constants (unchanged)
 # ------------------------------------------------------------------
 SQL_INSERT_REQUEST: str = """
     INSERT INTO requests (
@@ -62,21 +68,26 @@ SQL_SELECT_ALL_BATCH_REQUESTS: str = """
 
 
 class xAIPersistenceManager:
-    """Manages all PostgreSQL persistence for xAI requests/responses."""
+    """Manages all PostgreSQL persistence for xAI requests/responses.
+
+    Now supports multimodal media persistence when media_root is supplied.
+    """
 
     def __init__(
         self,
         pg_resolved_settings: Any = None,
         logger: logging.Logger | None = None,
         conversation_id: str | None = None,
+        media_root: Path | str | None = None,                                             # NEW: required for media saving
     ) -> None:
         self._pg_resolved_settings = pg_resolved_settings
         self._pool: Any = None
         self.logger = logger or logging.getLogger(__name__)
         self.conversation_id = conversation_id or "unknown"
+        self.media_root = Path(media_root) if media_root else None
 
         # ------------------------------------------------------------------
-        # Pool & provider helpers (from your original code)
+        # Pool & provider helpers (unchanged)
         # ------------------------------------------------------------------
 
     async def get_pool(self) -> Any:
@@ -100,11 +111,10 @@ class xAIPersistenceManager:
                 ) from exc
         return self._pool
 
-    async def _get_pool(self) -> Any:                                                     # alias used in your original methods
+    async def _get_pool(self) -> Any:
         return await self.get_pool()
 
     async def get_or_create_provider_id(self, name: str = "xai") -> int:
-        """Return provider_id for 'xai'; create if missing (normalisation)."""
         pool = await self._get_pool()
         result = await execute_query(
             pool,
@@ -133,7 +143,6 @@ class xAIPersistenceManager:
         return result[0]["id"] if result else 1
 
     def _build_endpoint(self, request: xAIRequest) -> dict[str, Any]:
-        """Consistent endpoint metadata – aligned with Responses API."""
         return {
             "provider": "xai",
             "model": request.model,
@@ -143,18 +152,106 @@ class xAIPersistenceManager:
         }
 
     # ------------------------------------------------------------------
-    # Media placeholder (extend when multimodal support is added)
+    # FULL MULTIMODAL MEDIA SAVING (merged from former media_xai.py)
     # ------------------------------------------------------------------
     async def _save_media_files(
         self, response_id: uuid.UUID, request: xAIRequest
     ) -> list[str]:
-        """Placeholder – returns empty list for text-only client."""
-        if request.has_media():
-            self.logger.info(
-                "Media files detected but saving not yet implemented",
-                extra={"response_id": str(response_id)},
+        """Save multimodal images/files to the monthly/response_id folder structure.
+
+        Returns list of relative paths (from media root) for storage in responses.meta.
+        URLs are downloaded; local paths are copied. Index.txt is updated for auditing.
+        """
+        if not request.has_media() or self.media_root is None:
+            return []
+
+        prompt_snippet = request.extract_prompt_snippet(max_chars=100)
+
+        media_items: list[dict[str, str]] = []
+        for msg in request.get_messages():
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict):
+                        ptype = part.get("type")
+                        if ptype in ("input_image", "input_file"):
+                            url_or_path = (
+                                part.get("image_url")
+                                or part.get("file_url")
+                                or part.get("url")
+                            )
+                            if url_or_path:
+                                media_items.append(
+                                    {
+                                        "type": ptype,
+                                        "url_or_path": url_or_path,
+                                        "original_name": Path(url_or_path).name
+                                        or "file",
+                                    }
+                                )
+
+        if not media_items:
+            return []
+
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        response_folder = self.media_root / month / str(response_id)
+        response_folder.mkdir(parents=True, exist_ok=True)
+
+        relative_paths: list[str] = []
+        for item in media_items:
+            src = item["url_or_path"]
+            safe_name = Path(item["original_name"]).name
+            dest_path = response_folder / safe_name
+
+            try:
+                if src.startswith(("http://", "https://")):
+
+                    def _download() -> None:
+                        urllib.request.urlretrieve(src, str(dest_path))
+
+                    await asyncio.to_thread(_download)
+                else:
+                    await asyncio.to_thread(shutil.copy2, src, dest_path)
+
+                self.logger.info(
+                    "Media file saved successfully",
+                    extra={"obj": {"response_id": str(response_id), "src": src}},
+                )
+            except (URLError, OSError, FileNotFoundError) as exc:
+                self.logger.warning(
+                    "Failed to save media file",
+                    extra={
+                        "obj": {
+                            "response_id": str(response_id),
+                            "src": src,
+                            "error": str(exc),
+                        }
+                    },
+                )
+                continue
+
+            relative_path = f"{month}/{response_id}/{safe_name}"
+            relative_paths.append(relative_path)
+
+            # Append to index.txt
+            index_line = (
+                f"{response_id}|"
+                f"{datetime.now(timezone.utc).isoformat()}|"
+                f"{relative_path}|"
+                f"{prompt_snippet}\n"
             )
-        return []
+            index_path = self.media_root / "index.txt"
+
+            def _append_index() -> None:
+                index_path.parent.mkdir(parents=True, exist_ok=True)
+                with index_path.open("a", encoding="utf-8") as f:
+                    f.write(index_line)
+
+            await asyncio.to_thread(_append_index)
+
+        return relative_paths
 
     # ------------------------------------------------------------------
     # Persistence methods (your original logic, now class methods)
@@ -293,6 +390,7 @@ class xAIPersistenceManager:
                 "obj": {
                     "response_id": str(response_id),
                     "reasoning_captured": bool(grok_resp.reasoning_text),
+                    "media_files_count": len(media_files),
                     "batch_id": batch_id,
                 }
             },

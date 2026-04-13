@@ -5,17 +5,16 @@ from datetime import datetime
 from typing import Any, Optional
 
 from xai_sdk import AsyncClient
-from xai_sdk.chat import system, user                                                     # SDK message builders
+from xai_sdk.chat import system, user
 
-from ...data_structures.xai_objects import (                                              # exact path as provided
+from ...data_structures.xai_objects import (
     SaveMode,
     xAIInput,
     xAIJSONResponseSpec,
     xAIRequest,
     xAIResponse,
 )
-from ..xai_client import BaseXAIClient                                                    # type reference only
-from .common_xai import _generate_non_streaming
+from ..xai_client import BaseXAIClient
 from .errors_xai import wrap_infopypg_error, xAIClientError
 from .persistence_xai import xAIPersistenceManager
 
@@ -35,29 +34,31 @@ async def create_turn_chat_session(
     save_mode: SaveMode = "none",
     **kwargs: Any,
 ) -> xAIResponse:
-    """Create a stateful turn-based chat completion using the official xAI SDK.
+    """Create a stateful turn-based chat using the official xAI SDK.
 
-    This replaces the previous custom HTTP implementation. The SDK manages
-    conversation state internally via the returned chat object, which is attached
-    to the response for easy continuation in subsequent turns.
-
-    Args:
-        client: BaseXAIClient instance (provides logger and persistence manager).
-        sdk_client: The official AsyncClient from xai_sdk.
-        messages: Full conversation history (list of dicts with 'role' and 'content').
-        model: Model identifier (default: "grok-3").
-        temperature, max_tokens, top_p: Standard generation parameters.
-        save_mode: Persistence behaviour ("none" or "postgres").
-        **kwargs: Additional parameters passed through to the SDK chat.create().
-
-    Returns:
-        xAIResponse instance (identical contract to the previous implementation).
-        The response object also contains a private `_sdk_chat` attribute for
-        stateful continuation if the caller wishes to avoid rebuilding history.
+    Fully supports multimodal media (images/files) – see xAIRequest docstring for attachment format.
+    Media files are automatically saved to disk when persistence_manager.media_root is configured.
     """
     client.logger.info(
         "Creating turn-based xAI chat (official SDK)",
-        extra={"model": model, "message_count": len(messages)},
+        extra={
+            "model": model,
+            "message_count": len(messages),
+            "has_media": any(
+                msg.get("content")
+                and isinstance(msg.get("content"), list)
+                and any(
+                    isinstance(part, dict)
+                    and part.get("type") in ("input_image", "input_file")
+                    for part in (
+                        msg.get("content")
+                        if isinstance(msg.get("content"), list)
+                        else []
+                    )
+                )
+                for msg in messages
+            ),
+        },
     )
 
     # 1. Build xAIRequest (reuses all existing validation + response_spec logic)

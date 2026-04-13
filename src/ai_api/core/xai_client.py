@@ -1,15 +1,4 @@
-"""
-High-level asynchronous client for the xAI API using the official xAI SDK.
-
-This module provides the ``XAIClient`` factory function, which returns a
-specialised async client instance tailored to the requested chat mode
-("turn", "stream", "batch", or "multimodal"). The implementation leverages
-the official ``xai_sdk`` package (particularly ``AsyncClient`` for streaming)
-while exposing a uniform ``create_chat()`` interface across all modes.
-
-Persistence, streaming, and batch operations are delegated to dedicated
-helper modules under ``.xai`` for clean separation of concerns.
-"""
+"""High-level asynchronous client for the xAI API using the official xAI SDK."""
 
 import logging
 from collections.abc import AsyncIterator
@@ -25,12 +14,11 @@ from ..data_structures.xai_objects import (
 )
 from .xai.chat_batch_xai import create_batch_chat
 from .xai.chat_multim_xai import create_multim_chat
-from .xai.chat_stream_xai import create_stream_chat
+from .xai.chat_stream_xai import generate_stream_and_persist
 from .xai.chat_turn_xai import create_turn_chat_session
 from .xai.persistence_xai import xAIPersistenceManager
-from .xai.stream_xai import generate_stream_and_persist
 
-ChatMode = Literal["turn", "stream", "batch", "multim"]
+ChatMode = Literal["turn", "stream", "batch"]
 
 
 class BaseXAIClient:
@@ -45,24 +33,20 @@ class BaseXAIClient:
         persistence_manager: "xAIPersistenceManager" | None = None,
         **kwargs: Any,
     ) -> None:
-        """Initialise the asynchronous xAI client."""
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.logger = logger
         self.persistence_manager = persistence_manager
-        self._http_client = None                                                          # retained only for non-turn modes
+        self._http_client = None
         self._sdk_client: XAIAsyncClient | None = None
 
     async def _get_sdk_client(self) -> XAIAsyncClient:
         if self._sdk_client is None:
-            self._sdk_client = XAIAsyncClient(
-                api_key=self.api_key
-            )                                                                             # SDK handles base_url, timeouts, retries
+            self._sdk_client = XAIAsyncClient(api_key=self.api_key)
         return self._sdk_client
 
     async def aclose(self) -> None:
-        # SDK clients are lightweight; no explicit close required in most cases
         pass
 
 
@@ -74,9 +58,19 @@ class TurnXAIClient(BaseXAIClient):
         *,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        save_mode: SaveMode = "none",
         **kwargs: Any,
     ) -> Any:
-        """Create a stateful turn-based chat using the official xAI SDK."""
+        """Create a stateful turn-based chat (fully supports multimodal).
+
+        Multimodal example:
+            messages = [{"role": "user", "content": [
+                {"type": "input_text", "text": "Describe this"},
+                {"type": "input_image", "image_url": "https://..."},
+                {"type": "input_file",  "file_url": "/path/to/file.pdf"}
+            ]}]
+        Media files are automatically saved when persistence_manager.media_root is set.
+        """
         if self._sdk_client is None:
             self._sdk_client = XAIAsyncClient(api_key=self.api_key)
         return await create_turn_chat_session(
@@ -86,6 +80,7 @@ class TurnXAIClient(BaseXAIClient):
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
+            save_mode=save_mode,
             **kwargs,
         )
 
@@ -97,16 +92,6 @@ class StreamXAIClient(BaseXAIClient):
     streaming (combined with optional persistence) to ``generate_stream_and_persist``.
     """
 
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._sdk_client: XAIAsyncClient | None = None
-
-    async def _get_sdk_client(self) -> XAIAsyncClient:
-        """Lazy-initialise the official xAI AsyncClient (shares auth with HTTP client)."""
-        if self._sdk_client is None:
-            self._sdk_client = XAIAsyncClient(api_key=self.api_key)
-        return self._sdk_client
-
     async def create_chat(
         self,
         messages: list[dict],
@@ -117,15 +102,12 @@ class StreamXAIClient(BaseXAIClient):
         save_mode: SaveMode = "none",
         **kwargs: Any,
     ) -> AsyncIterator[LLMStreamingChunkProtocol]:
-        """Create a streaming chat completion using the official xAI SDK.
+        """Create a streaming chat completion (fully supports multimodal).
 
-        Yields individual `LLMStreamingChunkProtocol` objects in real time.
-        If `save_mode="postgres"` the request is persisted before streaming
-        and the final accumulated response is persisted once at completion.
+        Same media-attachment format as turn mode. Media files are saved at completion.
         """
         sdk_client = await self._get_sdk_client()
 
-        # Build canonical request object (reuses existing models)
         xai_input = xAIInput.from_list(messages)
         request = xAIRequest(
             input=xai_input,
@@ -136,15 +118,17 @@ class StreamXAIClient(BaseXAIClient):
             **kwargs,
         )
 
-        # Create SDK chat object (official pattern)
         chat = sdk_client.chat.create(
             model=request.model,
-            **request.to_api_kwargs(),                                                    # reuse your existing helper if it maps correctly
+            **request.to_sdk_chat_kwargs(),
         )
 
-        # Delegate to updated generate_stream_and_persist (now SDK-based)
         async for chunk in generate_stream_and_persist(
-            sdk_client, chat, request, save_mode=save_mode
+            self.logger,
+            self.persistence_manager,
+            chat,
+            request,
+            save_mode=save_mode,
         ):
             yield chunk
 
@@ -169,26 +153,6 @@ class BatchXAIClient(BaseXAIClient):
         )
 
 
-class MultimXAIClient(BaseXAIClient):
-    async def create_chat(
-        self,
-        messages: list[dict],
-        model: str,
-        *,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        **kwargs: Any,
-    ) -> Any:
-        return await create_multim_chat(
-            self,
-            messages,
-            model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            **kwargs,
-        )
-
-
 def XAIClient(
     logger: logging.Logger,
     api_key: str,
@@ -199,40 +163,14 @@ def XAIClient(
     persistence_manager: "xAIPersistenceManager" | None = None,
     **kwargs: Any,
 ) -> BaseXAIClient:
-    """Factory function that creates and returns a specialised xAI client
-    for the requested interaction mode using the official xAI SDK.
+    """Factory function returning a specialised xAI client.
 
-    This is the primary public entry point to the xAI API library. It returns a
-    client instance with a consistent ``create_chat(...)`` interface regardless
-    of the underlying chat modality.
-
-    The ``mode`` parameter selects the appropriate specialised implementation
-    while ensuring seamless integration with ``xai_sdk.AsyncClient``.
-
-    Args:
-        api_key: xAI API key used for authentication.
-        mode: Determines the chat interaction type and behaviour of ``create_chat``.
-            Must be one of: "turn", "stream", "batch", or "multim".
-            Defaults to "turn" (standard non-streaming chat).
-        base_url: Base URL for the xAI API service.
-        timeout: Default HTTP request timeout in seconds.
-        **kwargs: Additional arguments passed directly to ``httpx.AsyncClient``.
-
-    Returns:
-        An instance of the appropriate client subclass (``TurnXAIClient``,
-        ``StreamXAIClient``, etc.) which supports async context management
-        and provides ``create_chat``.
-
-    Example:
-        >>> client = XAIClient(api_key="xai-...", mode="stream")
-        >>> async for chunk in client.create_chat(messages=..., model="grok-3"):
-        ...     print(chunk)
+    Provide a persistence_manager with media_root=Path(...) for automatic media saving.
     """
     client_map: dict[ChatMode, Type[BaseXAIClient]] = {
         "turn": TurnXAIClient,
         "stream": StreamXAIClient,
         "batch": BatchXAIClient,
-        "multim": MultimXAIClient,
     }
 
     ClientClass = client_map.get(mode)

@@ -27,6 +27,13 @@ Design principles:
 
 Application code interacts primarily with ``xAIRequest`` and ``xAIResponse``
 while the lower-level models ensure correct mapping to the xAI SDK.
+
+Multimodal attachment (now the canonical way for turn/stream modes):
+    content = [
+        {"type": "input_text", "text": "Describe this"},
+        {"type": "input_image", "image_url": "https://... or /local/path.jpg"},
+        {"type": "input_file",  "file_url": "/local/path.pdf"}
+    ]
 """
 
 import time
@@ -252,6 +259,9 @@ class xAIMessage:
             detail = item.get("detail", "auto")
             if detail not in ("auto", "low", "high"):
                 raise ValueError("detail must be 'auto', 'low', or 'high'.")
+        elif typ == "input_file":                                                         # NEW validation
+            if "file_url" not in item or not isinstance(item["file_url"], str):
+                raise ValueError("input_file requires 'file_url': str.")
         elif typ is None:
             raise ValueError("Each item must have 'type' key.")
         else:
