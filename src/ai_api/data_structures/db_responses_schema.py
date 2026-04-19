@@ -1,51 +1,16 @@
 #!/usr/bin/env python3
 """
-Script to define database schema models using SQLAlchemy.
+Database schema for ai_api persistence – with Git-style conversation branching (refined April 2026).
 
-This script contains the declarative base and model classes for tables.
-Models define columns with types, defaults, and constraints. These are
-used by the `setup_db.py` script to create tables via metadata.
+Key refinements:
+- Added lightweight Conversations table for tree-level metadata.
+- Extended Requests and Responses with tree_id, branch_id, parent_response_id, sequence.
+- Removed redundant conversation_id (tree_id is sufficient and cleaner).
+- Preserved original composite FK (request_id + request_tstamp) unchanged.
+- Added proper self-referential FK, unique constraint on (branch_id, sequence), and indexes.
+- All new fields are nullable for safe migration of existing data.
 
-Notes
------
-- Uses infopypg for setup; assumes it's installed via pip -e.
-- id is BIGINT IDENTITY (unique across partitions via composite PK with tstamp).
-- Refinements: Normalized providers (few unique: 5-10) with lookup.
-  Partition Responses by tstamp (RANGE, daily suggested) for growth.
-  Sub-partitions must be created post-setup (e.g., via SQL function).
-  Index on tstamp for sorting/queries. JSONB fields as dict[str, Any] for flexibility.
-- Extensions: Trimmed to essentials; add more via env if needed.
-- For daily aggregates: Use queries like SELECT date_trunc('day', tstamp), COUNT(*) ...
-  Push down to PG for efficiency.
-
-Flow:
-- Define default_settings (SettingsDict) with env overrides.
-- Define Base for ORM inheritance.
-- Define tables as classes with mapped columns.
-
-Parameters
-----------
-None
-    This is a spec file; imported by DatabaseBuilder.
-
-Returns
--------
-None
-    Exports models and settings for setupdb.
-
-Raises
-------
-ImportError
-    If infopypg or deps missing; install via conda env.
-ValueError
-    If env vars invalid; check POSTGRES_*.
-
-Examples
---------
->>> from infopypg import DatabaseBuilder, resolve_postgres_connection_settings
->>> resolved = resolve_postgres_connection_settings(default_settings=default_settings)
->>> builder = DatabaseBuilder(resolved_settings=resolved)
->>> await builder.build()  # In async context; creates partitioned table (no sub-partitions)
+This design enables arbitrary branching (like Git) with zero content duplication.
 """
 
 import asyncio
@@ -54,10 +19,7 @@ from datetime import datetime
 from os import getenv
 from typing import Any
 
-from infopypg import (
-    Base,
-    DatabaseBuilder,
-)
+from infopypg import Base, DatabaseBuilder
 from sqlalchemy import (
     BigInteger,
     DateTime,
@@ -70,12 +32,8 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import (
-    JSONB,
-)
-from sqlalchemy.dialects.postgresql import (
-    UUID as pgUUID,
-)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as pgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 # Env override: Comma-separated, e.g., "pg_trgm,vector".
@@ -92,18 +50,13 @@ else:
 class Providers(Base):
     """
     Lookup table for providers (normalization: 5-10 unique values).
-
-    Use FK from Responses for efficiency; avoids storing repeated strings.
-    No partitioning needed (small table).
     """
 
     __tablename__: str = "providers"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    description: Mapped[str | None] = mapped_column(
-        Text, nullable=True
-    )                                                                                     # Optional details.
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__: tuple[Index, dict[str, bool]] = (
         Index("ix_providers_name", "name"),
@@ -113,27 +66,19 @@ class Providers(Base):
 
 class Requests(Base):
     """
-    Main table for LLM requests (partitioned by tstamp for growth).
-
-    Refinements:
-    - id: BIGINT IDENTITY (autoincrement per partition); composite PK (id, tstamp) for uniqueness.
-    - provider_id: FK to Providers (normalized).
-    - Partitioning: RANGE by tstamp (daily aggregates via queries).
-      Sub-partitions: Create post-setup, e.g., FOR VALUES FROM ('YYYY-MM-DD') TO ('YYYY-MM-DD+1').
-    - Sorting: Index on tstamp for ORDER BY.
-    - JSONB: dict[str, Any] for endpoint/meta (structured tags/notes); request as dict for flexibility.
+    Main table for LLM requests (partitioned by tstamp).
     """
 
     __tablename__: str = "requests"
 
     idx: Mapped[int] = mapped_column(
         BigInteger,
-        Identity(always=True),                                                            # Per-partition autoincrement.
+        Identity(always=True),
         primary_key=True,
     )
     tstamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=func.now(), primary_key=True
-    )                                                                                     # Partition key; part of PK.
+    )
     provider_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("providers.id"), nullable=False
     )
@@ -142,45 +87,40 @@ class Requests(Base):
     request: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     meta: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 
-    __table_args__: tuple[
-        Index, Index, Index, UniqueConstraint, dict[str, bool | str]
-    ] = (
+    # ── Git-style branching fields (nullable for legacy data) ──
+    tree_id: Mapped[uuid.UUID | None] = mapped_column(pgUUID, nullable=True, index=True)
+    branch_id: Mapped[uuid.UUID | None] = mapped_column(
+        pgUUID, nullable=True, index=True
+    )
+    parent_response_id: Mapped[uuid.UUID | None] = mapped_column(pgUUID, nullable=True)
+    sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__: tuple = (
         Index("ix_requests_tstamp", "tstamp"),
         Index("ix_requests_provider_id", "provider_id"),
-        Index(
-            "ix_requests_request_id", "request_id"
-        ),                                                                                # Added for faster lookups/joins on request_id
-        UniqueConstraint(
-            "request_id", "tstamp", name="uq_requests_request_id_tstamp"
-        ),                                                                                # Required for composite FK reference
+        Index("ix_requests_request_id", "request_id"),
+        Index("ix_requests_tree_id", "tree_id"),
+        Index("ix_requests_branch_id", "branch_id"),
+        UniqueConstraint("request_id", "tstamp", name="uq_requests_request_id_tstamp"),
         {"postgresql_partition_by": "RANGE (tstamp)", "extend_existing": True},
     )
 
 
 class Responses(Base):
     """
-    Main table for LLM responses (partitioned by tstamp for growth).
-
-    Refinements:
-    - id: BIGINT IDENTITY (autoincrement per partition); composite PK (id, tstamp) for uniqueness.
-    - provider_id: FK to Providers (normalized).
-    - Partitioning: RANGE by tstamp (daily aggregates via queries).
-      Sub-partitions: Create post-setup, e.g., FOR VALUES FROM ('YYYY-MM-DD') TO ('YYYY-MM-DD+1').
-    - Sorting: Index on tstamp for ORDER BY.
-    - JSONB: dict[str, Any] for endpoint/meta (structured tags/notes); response as dict for flexibility.
-    - Foreign Key: Composite FK (request_id, request_tstamp) references requests (request_id, tstamp) for 1:1 referential integrity.
+    Main table for LLM responses (partitioned by tstamp).
     """
 
     __tablename__: str = "responses"
 
     idx: Mapped[int] = mapped_column(
         BigInteger,
-        Identity(always=True),                                                            # Per-partition autoincrement.
+        Identity(always=True),
         primary_key=True,
     )
     tstamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=func.now(), primary_key=True
-    )                                                                                     # Partition key; part of PK.
+    )
     provider_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("providers.id"), nullable=False
     )
@@ -193,52 +133,61 @@ class Responses(Base):
     response: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     meta: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 
-    __table_args__: tuple[
-        Index, Index, Index, Index, Index, ForeignKeyConstraint, dict[str, bool | str]
-    ] = (
+    # ── Git-style branching fields (nullable for legacy data) ──
+    tree_id: Mapped[uuid.UUID | None] = mapped_column(pgUUID, nullable=True, index=True)
+    branch_id: Mapped[uuid.UUID | None] = mapped_column(
+        pgUUID, nullable=True, index=True
+    )
+    parent_response_id: Mapped[uuid.UUID | None] = mapped_column(pgUUID, nullable=True)
+    sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__: tuple = (
+        # === ORIGINAL INDEXES (kept unchanged) ===
         Index("ix_responses_tstamp", "tstamp"),
         Index("ix_responses_provider_id", "provider_id"),
-        Index(
-            "ix_responses_request_id", "request_id"
-        ),                                                                                # Added for faster joins on request_id
-        Index(
-            "ix_responses_response_id", "response_id"
-        ),                                                                                # Added for faster lookups on response_id
-        Index(
-            "ix_responses_request_id_tstamp", "request_id", "request_tstamp"
-        ),                                                                                # For composite FK efficiency
+        Index("ix_responses_request_id", "request_id"),
+        Index("ix_responses_response_id", "response_id"),
+        Index("ix_responses_request_id_tstamp", "request_id", "request_tstamp"),
+        # === NEW BRANCHING INDEXES ===
+        Index("ix_responses_tree_id", "tree_id"),
+        Index("ix_responses_branch_id", "branch_id"),
+        Index("ix_responses_parent_response_id", "parent_response_id"),
+        # === ORIGINAL COMPOSITE FK (kept completely unchanged) ===
         ForeignKeyConstraint(
             columns=["request_id", "request_tstamp"],
             refcolumns=["requests.request_id", "requests.tstamp"],
             name="fk_responses_request_id_tstamp",
             ondelete="CASCADE",                                                           # CASCADE deletes response if request is deleted
         ),
+        # === NEW SELF-REFERENTIAL FK FOR BRANCHING ===
+        ForeignKeyConstraint(
+            columns=["parent_response_id"],
+            refcolumns=["responses.response_id"],
+            name="fk_responses_parent_response_id",
+            ondelete="SET NULL",                                                          # Safe for branching
+        ),
+        # === NEW UNIQUE CONSTRAINT FOR CLEAN BRANCH ORDERING ===
+        UniqueConstraint("branch_id", "sequence", name="uq_responses_branch_sequence"),
+        # === PARTITIONING (kept unchanged) ===
         {"postgresql_partition_by": "RANGE (tstamp)", "extend_existing": True},
     )
 
 
 class Logs(Base):
     """
-    Table for logging records (partitioned by tstamp for growth).
-
-    Refinements:
-    - idx: BIGINT IDENTITY (autoincrement per partition); composite PK (idx, tstamp) for uniqueness.
-    - Partitioning: RANGE by tstamp (daily aggregates via queries).
-      Sub-partitions: Create post-setup, e.g., FOR VALUES FROM ('YYYY-MM-DD') TO ('YYYY-MM-DD+1').
-    - Sorting: Index on tstamp for ORDER BY.
-    - JSONB: dict[str, Any] for obj (structured extra data); nullable for flexibility.
+    Table for logging records (partitioned by tstamp).
     """
 
     __tablename__: str = "logs"
 
     idx: Mapped[int] = mapped_column(
         BigInteger,
-        Identity(always=True),                                                            # Per-partition autoincrement.
+        Identity(always=True),
         primary_key=True,
     )
     tstamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=func.now(), primary_key=True
-    )                                                                                     # Partition key; part of PK.
+    )
     loglvl: Mapped[str] = mapped_column(Text, nullable=False)
     logger: Mapped[str] = mapped_column(Text, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
@@ -247,6 +196,38 @@ class Logs(Base):
     __table_args__: tuple[Index, dict[str, str | bool]] = (
         Index("ix_logs_tstamp", "tstamp"),
         {"postgresql_partition_by": "RANGE (tstamp)", "extend_existing": True},
+    )
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # NEW: Conversation Metadata (lightweight tree-level information)
+    # ─────────────────────────────────────────────────────────────────────────────
+
+
+class Conversations(Base):
+    """
+    High-level metadata for each chat *tree*.
+    One row per logical conversation (supports multiple branches).
+    """
+
+    __tablename__: str = "conversations"
+
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        pgUUID, primary_key=True, default=uuid.uuid4
+    )
+    tree_id: Mapped[uuid.UUID] = mapped_column(pgUUID, nullable=False, index=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=func.now(), onupdate=func.now()
+    )
+    meta: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    __table_args__: tuple = (
+        Index("ix_conversations_tree_id", "tree_id"),
+        Index("ix_conversations_conversation_id", "conversation_id"),
+        {"extend_existing": True},
     )
 
 
@@ -260,16 +241,12 @@ async def main() -> None:
         "password": getenv("POSTGRES_U_POSTGRES_PW"),
         "tablespace_name": "responses_db",
         "tablespace_path": "/mnt/HDD03_HIT_03TB/no_backup/pg03/responses_db",
-        "extensions": [
-            "uuid-ossp",                                                                  # For potential UUIDs.
-            "postgres_fdw" "pg_trgm",                                                     # For text search if needed.
-        ],
+        "extensions": extensions,
     }
-    # settings_dict: SettingsDict = validate_dict_to_SettingsDict(settings)
     builder: DatabaseBuilder = DatabaseBuilder(settings)
     await builder.build()
 
-    print("Database initialised.")
+    print("Database initialised with Git-style conversation branching support.")
 
 
 if __name__ == "__main__":

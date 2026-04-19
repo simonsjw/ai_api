@@ -13,7 +13,6 @@ from ..data_structures.xai_objects import (
     xAIRequest,
 )
 from .xai.chat_batch_xai import create_batch_chat
-from .xai.chat_multim_xai import create_multim_chat
 from .xai.chat_stream_xai import generate_stream_and_persist
 from .xai.chat_turn_xai import create_turn_chat_session
 from .xai.persistence_xai import xAIPersistenceManager

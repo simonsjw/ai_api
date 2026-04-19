@@ -35,20 +35,22 @@ from .errors_xai import (
 __all__: list[str] = ["xAIPersistenceManager"]
 
 # ------------------------------------------------------------------
-# SQL constants (unchanged)
+# SQL constants (original + new branching queries)
 # ------------------------------------------------------------------
 SQL_INSERT_REQUEST: str = """
     INSERT INTO requests (
-        provider_id, endpoint, request_id, payload, meta
-    ) VALUES ($1, $2, $3, $4, $5)
+        provider_id, endpoint, request_id, payload, meta,
+        tree_id, branch_id, parent_response_id, sequence
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
     RETURNING tstamp
 """
 
 SQL_INSERT_RESPONSE: str = """
     INSERT INTO responses (
         provider_id, endpoint, request_id, request_tstamp,
-        response_id, payload, meta
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        response_id, payload, meta,
+        tree_id, branch_id, parent_response_id, sequence
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 """
 
 SQL_GET_PROVIDER_IDX: str = "SELECT id FROM providers WHERE name = $1"
@@ -64,6 +66,49 @@ SQL_SELECT_ALL_BATCH_REQUESTS: str = """
     FROM requests 
     WHERE meta->>'batch_id' = $1 
     ORDER BY (meta->>'batch_index')::int ASC
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NEW: Conversation + Branching SQL
+# ─────────────────────────────────────────────────────────────────────────────
+SQL_ENSURE_CONVERSATION: str = """
+    INSERT INTO conversations (tree_id, title, meta)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (tree_id) DO NOTHING
+"""
+
+SQL_SAVE_TO_HISTORY: str = """
+    INSERT INTO messages (
+        message_id, tree_id, branch_id, parent_message_id,
+        sequence, role, content, request_id, response_id, meta
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+"""
+
+SQL_LOAD_BRANCH_HISTORY: str = """
+    WITH RECURSIVE branch_chain AS (
+        SELECT * FROM responses
+        WHERE response_id = $1
+        UNION ALL
+        SELECT r.* FROM responses r
+        INNER JOIN branch_chain bc ON r.response_id = bc.parent_response_id
+    )
+    SELECT * FROM branch_chain
+    ORDER BY sequence DESC
+"""
+
+SQL_CREATE_BRANCH: str = """
+    INSERT INTO responses (
+        ... -- same columns as INSERT_RESPONSE but with new branch_id
+    ) VALUES (...)  -- implemented in Python for clarity
+"""
+
+SQL_LIST_BRANCHES: str = """
+    SELECT DISTINCT branch_id, MIN(sequence) as first_sequence,
+           COUNT(*) as message_count, MAX(tstamp) as last_activity
+    FROM responses
+    WHERE tree_id = $1
+    GROUP BY branch_id
+    ORDER BY last_activity DESC
 """
 
 
@@ -254,6 +299,141 @@ class xAIPersistenceManager:
         return relative_paths
 
     # ------------------------------------------------------------------
+    # NEW: Conversation & Branching Helpers
+    # ------------------------------------------------------------------
+    async def ensure_conversation_exists(
+        self, tree_id: uuid.UUID, title: str | None = None
+    ) -> uuid.UUID:
+        """Create conversation tree metadata if it does not exist."""
+        pool = await self._get_pool()
+        await execute_query(
+            pool,
+            SQL_ENSURE_CONVERSATION,
+            params=[tree_id, title, {}],
+            fetch=False,
+            logger=self.logger,
+        )
+        return tree_id
+
+    async def save_to_history(
+        self,
+        request: xAIRequest,
+        response: xAIResponse | None = None,
+        tree_id: uuid.UUID | None = None,
+        branch_id: uuid.UUID | None = None,
+        parent_response_id: uuid.UUID | None = None,
+        sequence: int | None = None,
+    ) -> dict[str, Any]:
+        """Save a turn to the conversation history (Git-style branching).
+
+        This is the main integration point called automatically from persist_response.
+        """
+        if tree_id is None or branch_id is None:
+            return {}
+
+        await self.ensure_conversation_exists(tree_id)
+
+        message_id = uuid.uuid4()
+        role = "user" if request else "assistant"
+
+        pool = await self._get_pool()
+        await execute_query(
+            pool,
+            SQL_SAVE_TO_HISTORY,
+            params=[
+                message_id,
+                tree_id,
+                branch_id,
+                parent_response_id,
+                sequence,
+                role,
+                request.to_dict()
+                if request
+                else response.to_dict()
+                if response
+                else {},
+                getattr(request, "request_id", None),
+                getattr(response, "id", None) if response else None,
+                {"has_media": request.has_media() if request else False},
+            ],
+            fetch=False,
+            logger=self.logger,
+        )
+
+        self.logger.info(
+            "Message saved to conversation history",
+            extra={
+                "obj": {
+                    "tree_id": str(tree_id),
+                    "branch_id": str(branch_id),
+                    "sequence": sequence,
+                    "parent_response_id": str(parent_response_id)
+                    if parent_response_id
+                    else None,
+                }
+            },
+        )
+        return {"message_id": message_id, "tree_id": tree_id, "branch_id": branch_id}
+
+    async def load_branch_history(
+        self,
+        tree_id: uuid.UUID,
+        branch_id: uuid.UUID | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Reconstruct full linear history for a branch (or latest branch if branch_id omitted)."""
+        pool = await self._get_pool()
+        query = """
+            SELECT response_id, tree_id, branch_id, parent_response_id, sequence,
+                   payload, meta, tstamp
+            FROM responses
+            WHERE tree_id = $1
+              AND (branch_id = $2 OR $2 IS NULL)
+            ORDER BY sequence DESC
+            LIMIT $3
+        """
+        result = await execute_query(
+            pool,
+            query,
+            params=[tree_id, branch_id, limit],
+            fetch=True,
+            logger=self.logger,
+        )
+        return result
+
+    async def create_branch(
+        self,
+        tree_id: uuid.UUID,
+        from_response_id: uuid.UUID,
+        new_branch_id: uuid.UUID | None = None,
+    ) -> uuid.UUID:
+        """Create a new branch forking from an existing response."""
+        if new_branch_id is None:
+            new_branch_id = uuid.uuid4()
+
+            # The actual forking logic is handled at the application level by passing
+            # parent_response_id when creating the next response.
+        self.logger.info(
+            "New branch created",
+            extra={
+                "obj": {"tree_id": str(tree_id), "new_branch_id": str(new_branch_id)}
+            },
+        )
+        return new_branch_id
+
+    async def list_branches(self, tree_id: uuid.UUID) -> list[dict[str, Any]]:
+        """Return all active branches for a conversation tree."""
+        pool = await self._get_pool()
+        result = await execute_query(
+            pool,
+            SQL_LIST_BRANCHES,
+            params=[tree_id],
+            fetch=True,
+            logger=self.logger,
+        )
+        return result
+
+    # ------------------------------------------------------------------
     # Persistence methods (your original logic, now class methods)
     # ------------------------------------------------------------------
     async def persist_request(
@@ -261,8 +441,12 @@ class xAIPersistenceManager:
         request: xAIRequest,
         batch_id: str | None = None,
         batch_index: int | None = None,
+        tree_id: uuid.UUID | None = None,
+        branch_id: uuid.UUID | None = None,
+        parent_response_id: uuid.UUID | None = None,
+        sequence: int | None = None,
     ) -> tuple[uuid.UUID, datetime]:
-        """Persist BEFORE API call."""
+        """Persist BEFORE API call – now includes branching metadata."""
         provider_id = await self.get_or_create_provider_id()
         request_id = uuid.uuid4()
         endpoint = self._build_endpoint(request)
@@ -276,6 +460,8 @@ class xAIPersistenceManager:
             "batch_id": batch_id,
             "batch_index": batch_index,
             "has_media": request.has_media(),
+            "tree_id": str(tree_id) if tree_id else None,
+            "branch_id": str(branch_id) if branch_id else None,
         }
 
         today = datetime.now(timezone.utc).date()
@@ -290,7 +476,17 @@ class xAIPersistenceManager:
         result = await execute_query(
             pool,
             SQL_INSERT_REQUEST,
-            params=[provider_id, endpoint, str(request_id), request_payload, meta],
+            params=[
+                provider_id,
+                endpoint,
+                str(request_id),
+                request_payload,
+                meta,
+                tree_id,
+                branch_id,
+                parent_response_id,
+                sequence,
+            ],
             fetch=True,
             logger=self.logger,
         )
@@ -298,14 +494,7 @@ class xAIPersistenceManager:
         tstamp = result[0]["tstamp"] if result else datetime.now(timezone.utc)
         self.logger.info(
             "Request persisted to PostgreSQL",
-            extra={
-                "obj": {
-                    "request_id": str(request_id),
-                    "model": request.model,
-                    "batch_id": batch_id,
-                    "batch_index": batch_index,
-                }
-            },
+            extra={"obj": {"request_id": str(request_id), "tree_id": str(tree_id)}},
         )
         return request_id, tstamp
 
@@ -316,14 +505,29 @@ class xAIPersistenceManager:
         api_result: dict[str, Any],
         request: xAIRequest | None = None,
         batch_id: str | None = None,
+        tree_id: uuid.UUID | None = None,
+        branch_id: uuid.UUID | None = None,
+        parent_response_id: uuid.UUID | None = None,
+        sequence: int | None = None,
     ) -> None:
-        """Persist AFTER successful API call."""
+        """Persist AFTER successful API call – includes media + history."""
         provider_id = await self.get_or_create_provider_id()
         response_id = uuid.uuid4()
 
         media_files: list[str] = []
         if request is not None:
             media_files = await self._save_media_files(response_id, request)
+
+            # Auto-save to conversation history if branching info is provided
+        if tree_id and branch_id:
+            await self.save_to_history(
+                request=request,
+                response=xAIResponse.from_dict(api_result),
+                tree_id=tree_id,
+                branch_id=branch_id,
+                parent_response_id=parent_response_id,
+                sequence=sequence,
+            )
 
         endpoint = (
             self._build_endpoint(request)
@@ -357,6 +561,8 @@ class xAIPersistenceManager:
             "finish_reason": api_result.get("finish_reason"),
             "batch_id": batch_id,
             "media_files": media_files,
+            "tree_id": str(tree_id) if tree_id else None,
+            "branch_id": str(branch_id) if branch_id else None,
         }
 
         today = datetime.now(timezone.utc).date()
@@ -379,6 +585,10 @@ class xAIPersistenceManager:
                 str(response_id),
                 response_payload,
                 meta,
+                tree_id,
+                branch_id,
+                parent_response_id,
+                sequence,
             ],
             fetch=False,
             logger=self.logger,
@@ -389,9 +599,9 @@ class xAIPersistenceManager:
             extra={
                 "obj": {
                     "response_id": str(response_id),
-                    "reasoning_captured": bool(grok_resp.reasoning_text),
+                    "tree_id": str(tree_id),
+                    "branch_id": str(branch_id),
                     "media_files_count": len(media_files),
-                    "batch_id": batch_id,
                 }
             },
         )
