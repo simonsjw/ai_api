@@ -1,7 +1,7 @@
 """Postgres persistence layer for xAIClient using infopypg.
 
-Full xAIPersistenceManager class assembled from your provided methods.
-Compatible with the Responses API endpoint and your DB schema.
+Full xAIPersistenceManager class assembled from provided methods in objects.
+Compatible with the Responses API endpoint and DB schema.
 Now includes full multimodal media persistence.
 """
 
@@ -69,7 +69,7 @@ SQL_SELECT_ALL_BATCH_REQUESTS: str = """
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NEW: Conversation + Branching SQL
+# Conversation + Branching SQL
 # ─────────────────────────────────────────────────────────────────────────────
 SQL_ENSURE_CONVERSATION: str = """
     INSERT INTO conversations (tree_id, title, meta)
@@ -123,7 +123,7 @@ class xAIPersistenceManager:
         pg_resolved_settings: Any = None,
         logger: logging.Logger | None = None,
         conversation_id: str | None = None,
-        media_root: Path | str | None = None,                                             # NEW: required for media saving
+        media_root: Path | str | None = None,                                             # required for media saving
     ) -> None:
         self._pg_resolved_settings = pg_resolved_settings
         self._pool: Any = None
@@ -299,7 +299,7 @@ class xAIPersistenceManager:
         return relative_paths
 
     # ------------------------------------------------------------------
-    # NEW: Conversation & Branching Helpers
+    # Conversation & Branching Helpers
     # ------------------------------------------------------------------
     async def ensure_conversation_exists(
         self, tree_id: uuid.UUID, title: str | None = None
@@ -322,6 +322,7 @@ class xAIPersistenceManager:
         tree_id: uuid.UUID | None = None,
         branch_id: uuid.UUID | None = None,
         parent_response_id: uuid.UUID | None = None,
+        parent_message_id: uuid.UUID | None = None,
         sequence: int | None = None,
     ) -> dict[str, Any]:
         """Save a turn to the conversation history (Git-style branching).
@@ -345,12 +346,13 @@ class xAIPersistenceManager:
                 tree_id,
                 branch_id,
                 parent_response_id,
+                parent_message_id,
                 sequence,
                 role,
-                request.to_dict()
-                if request
-                else response.to_dict()
-                if response
+                asdict(request)
+                if request is not None
+                else asdict(response)
+                if response is not None
                 else {},
                 getattr(request, "request_id", None),
                 getattr(response, "id", None) if response else None,
@@ -380,7 +382,7 @@ class xAIPersistenceManager:
         tree_id: uuid.UUID,
         branch_id: uuid.UUID | None = None,
         limit: int | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, Any]] | None:
         """Reconstruct full linear history for a branch (or latest branch if branch_id omitted)."""
         pool = await self._get_pool()
         query = """
@@ -421,7 +423,7 @@ class xAIPersistenceManager:
         )
         return new_branch_id
 
-    async def list_branches(self, tree_id: uuid.UUID) -> list[dict[str, Any]]:
+    async def list_branches(self, tree_id: uuid.UUID) -> list[dict[str, Any]] | None:
         """Return all active branches for a conversation tree."""
         pool = await self._get_pool()
         result = await execute_query(
@@ -434,7 +436,7 @@ class xAIPersistenceManager:
         return result
 
     # ------------------------------------------------------------------
-    # Persistence methods (your original logic, now class methods)
+    # Persistence methods (original logic, now class methods)
     # ------------------------------------------------------------------
     async def persist_request(
         self,
@@ -519,7 +521,7 @@ class xAIPersistenceManager:
             media_files = await self._save_media_files(response_id, request)
 
             # Auto-save to conversation history if branching info is provided
-        if tree_id and branch_id:
+        if tree_id and branch_id and request is not None:
             await self.save_to_history(
                 request=request,
                 response=xAIResponse.from_dict(api_result),
@@ -609,8 +611,8 @@ class xAIPersistenceManager:
     async def persist_batch_results(
         self, batch_id: str, sdk_results: dict[str, Any]
     ) -> None:
-        """Persist succeeded batch responses (your original logic)."""
-        # (unchanged – uses your SQL_SELECT_ALL_BATCH_REQUESTS and _persist_response)
+        """Persist succeeded batch responses (original logic)."""
+        # (unchanged – uses SQL_SELECT_ALL_BATCH_REQUESTS and _persist_response)
         pool = await self._get_pool()
         requests_data = await execute_query(
             pool,
