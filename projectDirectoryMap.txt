@@ -1,16 +1,16 @@
 .
 ├── docs
-│   └── README_STREAMING.md
+│   ├── README_PERSISTANCE.md
+│   ├── README_STREAMING.md
+│   └── README_TURNBASED.md
 ├── src
 │   └── ai_api
 │       ├── core
 │       │   ├── xai
 │       │   │   ├── chat_batch_xai.py
-│       │   │   ├── chat_multim_xai.py
 │       │   │   ├── chat_stream_xai.py
 │       │   │   ├── chat_turn_xai.py
 │       │   │   ├── errors_xai.py
-│       │   │   ├── media_xai.py
 │       │   │   ├── persistence_xai.py
 │       │   │   └── response_struct_xai.py
 │       │   └── xai_client.py
