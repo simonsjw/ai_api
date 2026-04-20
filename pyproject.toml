@@ -1,6 +1,6 @@
 [project]
 name = "ai_api"
-version = "1.3.0"
+version = "1.2.0"
 authors = [{ name = "Simon Watson", email = "simon_watson_sjw@hotmail.com" }]
 maintainers = [
   { name = "Simon Watson", email = "simon_watson_sjw@hotmail.com" },
