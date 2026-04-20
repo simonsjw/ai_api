@@ -1,14 +1,13 @@
-"""Batch chat functionality for the xAI API.
+"""Batch chat functionality for the xAI API using the official xAI SDK.
 
-Creates a true asynchronous batch job using the official xAI Batch API
-(POST /v1/batches → POST /v1/batches/{batch_id}/requests).
+Now uses the SDK's native `client.batch` sub-client (added in early 2026).
+Much cleaner than raw HTTP calls.
 
 Fully integrated with:
 - persistence_xai.py (batch-level request + result persistence)
-- structured logging (extra={"obj": ...})
+- structured logging
 - custom error hierarchy
-- xAIRequest / xAIBatchRequest data structures
-- Responses API payload format inside each batch request
+- xAIRequest / xAIBatchResponse data structures
 """
 
 import uuid
@@ -19,18 +18,14 @@ from pydantic import BaseModel
 
 from ...data_structures.xai_objects import (
     SaveMode,
-    xAIBatchRequest,
     xAIBatchResponse,
     xAIInput,
-    xAIJSONResponseSpec,
     xAIRequest,
 )
 from ..xai_client import BaseXAIClient
-from .common_xai import _generate_non_streaming
 from .errors_xai import wrap_infopypg_error, xAIClientBatchError
-from .persistence_xai import xAIPersistenceManager
 
-__all__: list[str] = ["create_batch_chat"]
+__all__: list[str] = ["create_batch_chat", "retrieve_batch_results"]
 
 
 async def create_batch_chat(
@@ -38,7 +33,7 @@ async def create_batch_chat(
     messages: list[dict[str, Any]],
     model: str,
     *,
-    response_model: type["xAIJSONResponseSpec"] | None = None,                            # <-- NEW
+    response_model: type[BaseModel] | None = None,
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     top_p: Optional[float] = None,
@@ -46,17 +41,12 @@ async def create_batch_chat(
     batch_name: str | None = None,
     **kwargs: Any,
 ) -> xAIBatchResponse:
-    """Submit a single chat request as part of a new xAI batch job.
+    """Submit a single chat request as part of a new xAI batch job using the official SDK.
 
-    For true multi-request batches, construct an xAIBatchRequest and call
-    persist_batch_requests / persist_batch_results manually, or extend this
-    function to accept a list of messages lists.
-
-    This function returns an xAIBatchResponse containing the batch_id so you
-    can poll /v1/batches/{batch_id} later for results.
+    Returns an xAIBatchResponse containing the batch_id so you can poll results later.
     """
     client.logger.info(
-        "Creating xAI batch chat",
+        "Creating xAI batch chat (via SDK)",
         extra={
             "obj": {
                 "model": model,
@@ -66,12 +56,12 @@ async def create_batch_chat(
         },
     )
 
-    # 1. Build canonical xAIRequest (reuses all your existing validation / helpers)
+    # 1. Build canonical xAIRequest
     xai_input = xAIInput.from_list(messages)
     request = xAIRequest(
         input=xai_input,
         model=model,
-        response_model=response_model,
+        response_format=response_model,                                                   # xAIRequest uses response_format internally
         temperature=temperature,
         max_tokens=max_tokens,
         top_p=top_p,
@@ -83,13 +73,9 @@ async def create_batch_chat(
     batch_id = f"batch-{uuid.uuid4().hex[:12]}"
     batch_name = batch_name or f"batch-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
-    request_id: uuid.UUID | None = None
-    request_tstamp: datetime | None = None
-
     # === PERSISTENCE: BATCH REQUEST (before API call) ===
     if save_mode == "postgres" and client.persistence_manager is not None:
         try:
-            # persist_batch_requests expects a list of xAIRequest
             await client.persistence_manager.persist_batch_requests(
                 batch_id=batch_id,
                 requests=[request],
@@ -103,41 +89,28 @@ async def create_batch_chat(
                 "Batch request persistence failed (continuing)",
                 extra={"obj": {"batch_id": batch_id, "error": str(exc)}},
             )
-            # still raise so caller knows persistence failed
             raise wrap_infopypg_error(exc, "Failed to persist batch request") from exc
 
     try:
-        # Step 1: Create the batch container
-        create_batch_payload = {"name": batch_name}
-        batch_create_raw = await _generate_non_streaming(
-            client=client,
-            endpoint="/v1/batches",
-            json_data=create_batch_payload,
-        )
+        sdk_client = await client._get_sdk_client()
 
-        actual_batch_id = batch_create_raw.get("batch_id") or batch_create_raw.get("id")
-        if not actual_batch_id:
-            raise xAIClientBatchError("xAI Batch creation did not return a batch_id")
+        # Step 1: Create the batch container via SDK
+        batch = await sdk_client.batch.create(batch_name=batch_name)
 
+        actual_batch_id = batch.batch_id
         client.logger.info(
-            "Batch container created",
+            "Batch container created via SDK",
             extra={"obj": {"batch_id": actual_batch_id, "batch_name": batch_name}},
         )
 
-        # Step 2: Add the request to the batch (xAI expects Responses API format inside)
-        add_requests_payload = {
-            "batch_requests": [
-                {
-                    "batch_request_id": str(uuid.uuid4()),
-                    "batch_request": request.to_api_kwargs(),                             # reuses your clean Responses payload
-                }
-            ]
-        }
+        # Step 2: Prepare the request as an SDK chat object and add it to the batch
+        chat_for_batch = request.prepare_batch_chat(
+            sdk_client, batch_request_id=str(uuid.uuid4())
+        )
 
-        add_raw = await _generate_non_streaming(
-            client=client,
-            endpoint=f"/v1/batches/{actual_batch_id}/requests",
-            json_data=add_requests_payload,
+        add_raw = await sdk_client.batch.add(
+            batch_id=actual_batch_id,
+            batch_requests=[chat_for_batch],
         )
 
         # Build canonical response object
@@ -145,15 +118,20 @@ async def create_batch_chat(
             {
                 "id": actual_batch_id,
                 "name": batch_name,
-                "created_at": batch_create_raw.get("created_at"),
+                "created_at": getattr(batch, "created_at", None),
                 "status": "in_progress",
                 "results": add_raw,
-                "raw": {**batch_create_raw, "added_requests": add_raw},
+                "raw": {
+                    "batch_create": vars(batch)
+                    if hasattr(batch, "__dict__")
+                    else batch,
+                    "added_requests": add_raw,
+                },
             }
         )
 
         client.logger.info(
-            "Batch request submitted successfully",
+            "Batch request submitted successfully via SDK",
             extra={"obj": {"batch_id": actual_batch_id, "model": model}},
         )
 
@@ -172,15 +150,11 @@ async def create_batch_chat(
 async def retrieve_batch_results(
     client: BaseXAIClient,
     batch_id: str,
-    response_model: type["xAIJSONResponseSpec"] | None = None,
+    response_model: type[BaseModel] | None = None,
 ) -> xAIBatchResponse:
-    """Retrieve a completed xAI batch job and return a fully wrapped xAIBatchResponse.
-
-    Each item in .results is an xAIResponse instance, so .parsed (structured output)
-    is available immediately when response_model was supplied at creation time.
-    """
+    """Retrieve a completed xAI batch job using the official SDK."""
     client.logger.info(
-        "Retrieving xAI batch results",
+        "Retrieving xAI batch results via SDK",
         extra={
             "obj": {
                 "batch_id": batch_id,
@@ -190,24 +164,24 @@ async def retrieve_batch_results(
     )
 
     try:
-        # Fetch raw batch status and results via the existing non-streaming helper
-        batch_raw = await _generate_non_streaming(
-            client=client,
-            endpoint=f"/v1/batches/{batch_id}",                                           # no json_data since GET requests send no body.
-        )
+        sdk_client = await client._get_sdk_client()
+        batch_raw = await sdk_client.batch.get(batch_id=batch_id)
 
-        # Use the canonical factory – automatically wraps every result
-        # using xAIResponse.from_dict / from_sdk
-        completed_batch: xAIBatchResponse = xAIBatchResponse.from_dict(batch_raw)
+        # ── Safe conversion to dict (fixes Pyrefly error) ──
+        if hasattr(batch_raw, "model_dump"):                                              # Pydantic model
+            raw_dict = batch_raw.model_dump()
+        elif hasattr(batch_raw, "__dict__"):                                              # normal Python object
+            raw_dict = vars(batch_raw)
+        else:                                                                             # protobuf object (the common case)
+            from google.protobuf.json_format import MessageToDict
 
-        # Optional: update status in the wrapper if the API reports it
-        if completed_batch.status is None:
-            completed_batch = completed_batch.model_copy(
-                update={"status": batch_raw.get("status")}
-            )
+            raw_dict = MessageToDict(batch_raw, preserving_proto_field_name=True)
 
+        completed_batch: xAIBatchResponse = xAIBatchResponse.from_dict(raw_dict)
+
+        # ... rest of the function unchanged ...
         client.logger.info(
-            "Batch results retrieved successfully",
+            "Batch results retrieved successfully via SDK",
             extra={
                 "obj": {
                     "batch_id": completed_batch.batch_id,
@@ -218,29 +192,17 @@ async def retrieve_batch_results(
             },
         )
 
-        # === Structured output handling (validated_model = response.parsed) ===
         for idx, response in enumerate(completed_batch.results):
             if isinstance(response.parsed, BaseModel):
-                validated_model: BaseModel = response.parsed
                 client.logger.info(
                     "Processed structured batch result",
                     extra={
                         "obj": {
                             "batch_id": completed_batch.batch_id,
                             "index": idx,
-                            "model": type(validated_model).__name__,
+                            "model": type(response.parsed).__name__,
                         }
                     },
-                )
-                # Example: persist the validated model (extend persistence_xai.py as needed)
-                # await client.persistence_manager._persist_validated_model(
-                #     batch_id=completed_batch.batch_id, index=idx, model=validated_model
-                # )
-            else:
-                # Non-structured or fallback result
-                client.logger.debug(
-                    "Non-structured batch result",
-                    extra={"obj": {"batch_id": completed_batch.batch_id, "index": idx}},
                 )
 
         return completed_batch

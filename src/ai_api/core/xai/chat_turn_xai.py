@@ -14,15 +14,15 @@ from ...data_structures.xai_objects import (
     xAIRequest,
     xAIResponse,
 )
+from ..common.persistence import PersistenceManager
 from ..xai_client import BaseXAIClient
 from .errors_xai import wrap_infopypg_error, xAIClientError
-from .persistence_xai import xAIPersistenceManager
 
 __all__: list[str] = ["create_turn_chat_session"]
 
 
 async def create_turn_chat_session(
-    client: BaseXAIClient,
+    client: "BaseXAIClient",                                                              # forward reference – defined in xai_client.py
     sdk_client: AsyncClient,
     messages: list[dict[str, Any]],
     model: str = "grok-4",

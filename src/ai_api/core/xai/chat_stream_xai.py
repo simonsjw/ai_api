@@ -10,8 +10,8 @@ from ...data_structures.xai_objects import (
     xAIRequest,
     xAIStreamingChunk,
 )
+from ..common.persistence import PersistenceManager
 from .errors_xai import wrap_xai_api_error
-from .persistence_xai import xAIPersistenceManager
 
 __all__: list[str] = ["xai_stream", "generate_stream_and_persist"]
 
@@ -37,7 +37,7 @@ async def xai_stream(
 
 async def generate_stream_and_persist(
     logger: logging.Logger,
-    persistence_manager: "xAIPersistenceManager" | None,
+    persistence_manager: "PersistenceManager" | None,
     chat: Any,
     request: xAIRequest,
     save_mode: SaveMode = "none",

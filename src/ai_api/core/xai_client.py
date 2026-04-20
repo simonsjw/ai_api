@@ -12,10 +12,10 @@ from ..data_structures.xai_objects import (
     xAIInput,
     xAIRequest,
 )
+from .common.persistence import PersistenceManager
 from .xai.chat_batch_xai import create_batch_chat
 from .xai.chat_stream_xai import generate_stream_and_persist
 from .xai.chat_turn_xai import create_turn_chat_session
-from .xai.persistence_xai import xAIPersistenceManager
 
 ChatMode = Literal["turn", "stream", "batch"]
 
@@ -29,7 +29,7 @@ class BaseXAIClient:
         api_key: str,
         base_url: str = "https://api.x.ai/v1",
         timeout: Optional[int] = 120,
-        persistence_manager: "xAIPersistenceManager" | None = None,
+        persistence_manager: "PersistenceManager" | None = None,
         **kwargs: Any,
     ) -> None:
         self.api_key = api_key
@@ -159,7 +159,7 @@ def XAIClient(
     mode: ChatMode = "turn",
     base_url: str = "https://api.x.ai/v1",
     timeout: Optional[int] = 120,
-    persistence_manager: "xAIPersistenceManager" | None = None,
+    persistence_manager: "PersistenceManager" | None = None,
     **kwargs: Any,
 ) -> BaseXAIClient:
     """Factory function returning a specialised xAI client.
