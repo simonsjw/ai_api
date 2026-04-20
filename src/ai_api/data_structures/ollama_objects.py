@@ -340,3 +340,151 @@ class OllamaStreamingChunk:
 def parse_ollama_response(data: dict[str, Any]) -> OllamaResponse:
     """Helper used by the future Ollama client layer."""
     return OllamaResponse.from_dict(data)
+
+
+# ----------------------------------------------------------------------
+# Embeddings Support (Ollama /api/embed)
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class OllamaEmbedRequest:
+    """Lightweight request model for Ollama embeddings.
+
+    Fully supports the official /api/embed contract.
+
+    Attributes
+    ----------
+    model : str
+        Name of the embedding model (e.g. "nomic-embed-text", "mxbai-embed-large").
+    input : str | Sequence[str]
+        Single text or list of texts to embed.
+        Equivalent to NumPy: shape (n_inputs,) of strings.
+    truncate : bool, default True
+        Truncate inputs that exceed the model's context length.
+    options : dict[str, Any] | None, default None
+        Model-specific options (rarely needed for embeddings).
+    keep_alive : str | int | None, default None
+        How long to keep the model loaded (e.g. "5m", 300).
+    dimensions : int | None, default None
+        Target embedding dimension (supported by some models for reduction).
+    """
+
+    model: str
+    input: str | Sequence[str]
+    truncate: bool = True
+    options: dict[str, Any] | None = None
+    keep_alive: str | int | None = None
+    dimensions: int | None = None
+
+    def to_ollama_dict(self) -> dict[str, Any]:
+        """Build the exact JSON payload for POST /api/embed."""
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "input": self.input if isinstance(self.input, str) else list(self.input),
+            "truncate": self.truncate,
+        }
+        if self.options:
+            payload["options"] = self.options
+        if self.keep_alive is not None:
+            payload["keep_alive"] = self.keep_alive
+        if self.dimensions is not None:
+            payload["dimensions"] = self.dimensions
+        return {k: v for k, v in payload.items() if v is not None}
+
+
+@dataclass(frozen=True)
+class OllamaEmbedResponse:
+    """Lightweight response model for Ollama embeddings.
+
+    Attributes
+    ----------
+    model : str
+        Embedding model used.
+    embeddings : list[list[float]]
+        The generated vectors.
+        **NumPy notation**: equivalent to `np.ndarray` of shape `(n_inputs, embedding_dim)`.
+        Each inner list is one embedding vector (float32/64 depending on model).
+    total_duration : int | None
+        Total time in nanoseconds (includes model load + inference).
+    load_duration : int | None
+        Time to load the model into memory (ns).
+    prompt_eval_count : int | None
+        Number of tokens evaluated in the prompt(s).
+    prompt_eval_duration : int | None
+        Time spent evaluating the prompt(s) (ns).
+    raw : dict[str, Any]
+        Full raw response from Ollama (for debugging/advanced use).
+    """
+
+    model: str
+    embeddings: list[list[float]]
+    total_duration: int | None = None
+    load_duration: int | None = None
+    prompt_eval_count: int | None = None
+    prompt_eval_duration: int | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def n_inputs(self) -> int:
+        """Number of input texts embedded (shape[0] in NumPy terms)."""
+        return len(self.embeddings)
+
+    @property
+    def embedding_dim(self) -> int:
+        """Dimensionality of each vector (shape[1] in NumPy terms)."""
+        return len(self.embeddings[0]) if self.embeddings else 0
+
+    def to_numpy(self) -> "np.ndarray":
+        """Convert to NumPy array (lazy import — numpy is optional).
+
+        Returns
+        -------
+        np.ndarray
+            Shape: (n_inputs, embedding_dim), dtype=float32 or float64.
+        """
+        try:
+            import numpy as np
+        except ImportError as e:
+            raise ImportError(
+                "numpy is required for to_numpy(). " "Install with: pip install numpy"
+            ) from e
+        return np.array(self.embeddings, dtype=np.float32)
+
+    def cosine_similarity(self, idx1: int, idx2: int) -> float:
+        """Compute cosine similarity between two embeddings (SciPy notation).
+
+        Uses scipy.spatial.distance.cosine under the hood (lazy import).
+
+        Parameters
+        ----------
+        idx1, idx2 : int
+            Indices into self.embeddings.
+
+        Returns
+        -------
+        float
+            Cosine similarity in [-1, 1].
+        """
+        try:
+            from scipy.spatial.distance import cosine
+        except ImportError as e:
+            raise ImportError(
+                "scipy is required for cosine_similarity(). "
+                "Install with: pip install scipy"
+            ) from e
+        vec1 = self.embeddings[idx1]
+        vec2 = self.embeddings[idx2]
+        return 1.0 - cosine(vec1, vec2)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "OllamaEmbedResponse":
+        return cls(
+            model=data["model"],
+            embeddings=data.get("embeddings", []),
+            total_duration=data.get("total_duration"),
+            load_duration=data.get("load_duration"),
+            prompt_eval_count=data.get("prompt_eval_count"),
+            prompt_eval_duration=data.get("prompt_eval_duration"),
+            raw=data,
+        )
