@@ -24,6 +24,9 @@ from typing import Any, Literal, Protocol, Sequence, Type, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Import the new generic protocols
+from .base_objects import LLMEndpoint, LLMRequestProtocol, LLMResponseProtocol
+
 T = TypeVar("T", bound="OllamaJSONResponseSpec")
 
 __all__: list[str] = [
@@ -34,16 +37,15 @@ __all__: list[str] = [
     "OllamaResponse",
     "OllamaStreamingChunk",
     "OllamaJSONResponseSpec",
-    "LLMStreamingChunkProtocol",                                                          # re-exported for convenience
-    "SaveMode",                                                                           # re-exported
+    "LLMStreamingChunkProtocol",
+    "SaveMode",
+    "LLMRequestProtocol",                                                                 # re-exported
+    "LLMResponseProtocol",                                                                # re-exported
 ]
 
 # Re-export the shared protocol and type so existing code imports from here unchanged
 from .xai_objects import LLMStreamingChunkProtocol, SaveMode                              # type: ignore
 
-# ----------------------------------------------------------------------
-# Enums & simple types (kept identical to xAI for drop-in compatibility)
-# ----------------------------------------------------------------------
 type OllamaRole = Literal["system", "user", "assistant", "tool"]
 
 
@@ -55,7 +57,7 @@ class DoneReason(str, Enum):
     ERROR = "error"
 
     # ----------------------------------------------------------------------
-    # Structured output support (Ollama style)
+    # Structured Output (Ollama style)
     # ----------------------------------------------------------------------
 
 
@@ -73,12 +75,10 @@ class OllamaJSONResponseSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     def to_ollama_format(self) -> dict[str, Any] | str | None:
-        """Return the exact value expected in the 'format' field of an Ollama request."""
         if self.model is None:
             return None
         if isinstance(self.model, dict):
-            return self.model                                                             # raw JSON schema
-        # Pydantic model → schema
+            return self.model
         return self.model.model_json_schema()
 
     @classmethod
@@ -91,7 +91,7 @@ class OllamaJSONResponseSpec(BaseModel):
         return cls.parse_json(text)
 
     # ----------------------------------------------------------------------
-    # Message & Input (core building blocks)
+    # Message & Input
     # ----------------------------------------------------------------------
 
 
@@ -159,13 +159,13 @@ class OllamaInput:
         return cls(messages=tuple(processed))
 
     # ----------------------------------------------------------------------
-    # Request
+    # Main Request (implements LLMRequestProtocol)
     # ----------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class OllamaRequest(BaseModel):
-    """Ollama-native request (mirrors xAIRequest API)."""
+    """Ollama-native request (implements LLMRequestProtocol)."""
 
     model: str
     input: OllamaInput | str = Field(
@@ -176,9 +176,9 @@ class OllamaRequest(BaseModel):
     max_tokens: int | None = None                                                         # maps to 'num_predict' in Ollama options
     response_format: OllamaJSONResponseSpec | None = None
     tools: list[dict[str, Any]] | None = None
-    keep_alive: str | int | None = None                                                   # e.g. "5m"
+    keep_alive: str | int | None = None
     save_mode: SaveMode = "none"
-    prompt_cache_key: str | None = None                                                   # not used by Ollama but kept for API parity
+    prompt_cache_key: str | None = None                                                   # kept for API parity
 
     model_config = ConfigDict(frozen=True)
 
@@ -187,62 +187,63 @@ class OllamaRequest(BaseModel):
             self._validate_json_instruction_present()
 
     def _validate_json_instruction_present(self) -> None:
-        # Ollama does NOT require a magic string like xAI, but we keep the method for parity
-        pass
+        pass                                                                              # Ollama does NOT require a magic string like xAI
 
+    # ------------------------------------------------------------------
+    # LLMRequestProtocol implementation
+    # ------------------------------------------------------------------
+    def meta(self) -> dict[str, Any]:
+        """Return generation settings (implements LLMRequestProtocol)."""
+        return {
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "max_tokens": self.max_tokens,
+            "response_format": self.response_format.to_ollama_format()
+            if self.response_format
+            else None,
+            "tools": self.tools,
+            "keep_alive": self.keep_alive,
+            "save_mode": self.save_mode,
+        }
+
+    def payload(self) -> dict[str, Any]:
+        """Return the actual messages (implements LLMRequestProtocol)."""
+        return {
+            "messages": self.get_messages(),
+            "input_type": "chat" if not isinstance(self.input, str) else "raw",
+        }
+
+    def endpoint(self) -> LLMEndpoint:
+        """Return structured endpoint info (implements LLMRequestProtocol)."""
+        return LLMEndpoint(
+            provider="ollama",
+            model=self.model,
+            base_url="http://localhost:11434",
+            path="/api/chat",
+            api_type="native",
+        )
+
+    # ------------------------------------------------------------------
+    # Existing helper methods (kept for backward compatibility)
+    # ------------------------------------------------------------------
     def get_messages(self) -> list[dict[str, Any]]:
-        """Always returns normalised list of dicts (same contract as xAIRequest)."""
         if isinstance(self.input, str):
             return [{"role": "user", "content": self.input}]
         return self.input.to_list()
 
-    def to_ollama_dict(self) -> dict[str, Any]:
-        """Exact payload for Ollama /api/chat or /api/generate."""
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "messages": self.get_messages(),
-            "stream": False,                                                              # overridden by caller when streaming
-        }
-
-        options: dict[str, Any] = {}
-        if self.temperature is not None:
-            options["temperature"] = self.temperature
-        if self.top_p is not None:
-            options["top_p"] = self.top_p
-        if self.max_tokens is not None:
-            options["num_predict"] = self.max_tokens
-        if options:
-            payload["options"] = options
-
-        if self.response_format:
-            fmt = self.response_format.to_ollama_format()
-            if fmt:
-                payload["format"] = fmt
-
-        if self.tools:
-            payload["tools"] = self.tools
-
-        if self.keep_alive:
-            payload["keep_alive"] = self.keep_alive
-
-        return {k: v for k, v in payload.items() if v is not None}
-
     def has_media(self) -> bool:
-        """True if any user message contains base64 images."""
         for msg in self.get_messages():
             if msg.get("role") == "user" and msg.get("images"):
                 return True
         return False
 
     def extract_prompt_snippet(self, max_chars: int = 100) -> str:
-        """Same helper as xAI side (used by persistence)."""
         msgs = self.get_messages()
         for m in msgs:
             if m.get("role") == "user":
                 content = m.get("content", "")
                 if isinstance(content, str):
                     return content[:max_chars]
-                # multimodal text parts
                 text_parts = [
                     p.get("text", "")
                     for p in content
@@ -264,21 +265,21 @@ class OllamaRequest(BaseModel):
         return cls(**data)
 
     # ----------------------------------------------------------------------
-    # Response & Streaming Chunk
+    # Response (implements LLMResponseProtocol)
     # ----------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class OllamaResponse(BaseModel):
-    """Ollama-native response (non-streaming or final streaming chunk)."""
+    """Ollama-native response (implements LLMResponseProtocol)."""
 
     model: str
     created_at: str
-    message: dict[str, Any]                                                               # contains role, content, tool_calls, images
+    message: dict[str, Any]
     done: bool = True
     done_reason: DoneReason | None = None
 
-    # Ollama local performance telemetry (huge value for local models)
+    # Rich local performance telemetry
     total_duration: int | None = None
     load_duration: int | None = None
     prompt_eval_count: int | None = None
@@ -287,16 +288,53 @@ class OllamaResponse(BaseModel):
     eval_duration: int | None = None
 
     raw: dict[str, Any] = field(default_factory=dict)
-    parsed: BaseModel | dict | None = None                                                # for structured output
+    parsed: BaseModel | dict | None = None
 
     @property
     def text(self) -> str:
-        """Main assistant content (mirrors xAIResponse.text)."""
         return self.message.get("content", "") or ""
 
     @property
     def tool_calls(self) -> list[dict[str, Any]]:
         return self.message.get("tool_calls") or []
+
+    # ------------------------------------------------------------------
+    # LLMResponseProtocol implementation
+    # ------------------------------------------------------------------
+    def meta(self) -> dict[str, Any]:
+        """Return generation settings + telemetry (implements LLMResponseProtocol)."""
+        return {
+            "model": self.model,
+            "done_reason": self.done_reason.value if self.done_reason else None,
+            "total_duration": self.total_duration,
+            "load_duration": self.load_duration,
+            "prompt_eval_count": self.prompt_eval_count,
+            "eval_count": self.eval_count,
+        }
+
+    def payload(self) -> dict[str, Any]:
+        """Return the generated output + telemetry (implements LLMResponseProtocol)."""
+        return {
+            "text": self.text,
+            "tool_calls": self.tool_calls,
+            "finish_reason": self.done_reason.value if self.done_reason else None,
+            "parsed": self.parsed,
+            "telemetry": {
+                "total_duration_ms": round(self.total_duration / 1_000_000, 2)
+                if self.total_duration
+                else None,
+                "eval_count": self.eval_count,
+            },
+        }
+
+    def endpoint(self) -> LLMEndpoint:
+        return LLMEndpoint(
+            provider="ollama",
+            model=self.model,
+            base_url="http://localhost:11434",
+            path="/api/chat",
+            api_type="native",
+        )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "OllamaResponse":
@@ -319,6 +357,10 @@ class OllamaResponse(BaseModel):
         txt = self.text
         return txt[:max_chars] + "…" if len(txt) > max_chars else txt
 
+    # ----------------------------------------------------------------------
+    # Streaming Chunk (implements LLMStreamingChunkProtocol)
+    # ----------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class OllamaStreamingChunk:
@@ -334,157 +376,23 @@ class OllamaStreamingChunk:
     done_reason: DoneReason | None = None
     total_duration: int | None = None
 
-    # Convenience factory
+    def meta(self) -> dict[str, Any]:
+        return {
+            "done_reason": self.done_reason.value if self.done_reason else None,
+            "total_duration": self.total_duration,
+        }
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "finish_reason": self.finish_reason,
+            "is_final": self.is_final,
+        }
+
+    def endpoint(self) -> LLMEndpoint:
+        return LLMEndpoint(provider="ollama", model="streaming", api_type="native")
 
 
 def parse_ollama_response(data: dict[str, Any]) -> OllamaResponse:
-    """Helper used by the future Ollama client layer."""
+    """Helper used by the Ollama client layer."""
     return OllamaResponse.from_dict(data)
-
-
-# ----------------------------------------------------------------------
-# Embeddings Support (Ollama /api/embed)
-# ----------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class OllamaEmbedRequest:
-    """Lightweight request model for Ollama embeddings.
-
-    Fully supports the official /api/embed contract.
-
-    Attributes
-    ----------
-    model : str
-        Name of the embedding model (e.g. "nomic-embed-text", "mxbai-embed-large").
-    input : str | Sequence[str]
-        Single text or list of texts to embed.
-        Equivalent to NumPy: shape (n_inputs,) of strings.
-    truncate : bool, default True
-        Truncate inputs that exceed the model's context length.
-    options : dict[str, Any] | None, default None
-        Model-specific options (rarely needed for embeddings).
-    keep_alive : str | int | None, default None
-        How long to keep the model loaded (e.g. "5m", 300).
-    dimensions : int | None, default None
-        Target embedding dimension (supported by some models for reduction).
-    """
-
-    model: str
-    input: str | Sequence[str]
-    truncate: bool = True
-    options: dict[str, Any] | None = None
-    keep_alive: str | int | None = None
-    dimensions: int | None = None
-
-    def to_ollama_dict(self) -> dict[str, Any]:
-        """Build the exact JSON payload for POST /api/embed."""
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "input": self.input if isinstance(self.input, str) else list(self.input),
-            "truncate": self.truncate,
-        }
-        if self.options:
-            payload["options"] = self.options
-        if self.keep_alive is not None:
-            payload["keep_alive"] = self.keep_alive
-        if self.dimensions is not None:
-            payload["dimensions"] = self.dimensions
-        return {k: v for k, v in payload.items() if v is not None}
-
-
-@dataclass(frozen=True)
-class OllamaEmbedResponse:
-    """Lightweight response model for Ollama embeddings.
-
-    Attributes
-    ----------
-    model : str
-        Embedding model used.
-    embeddings : list[list[float]]
-        The generated vectors.
-        **NumPy notation**: equivalent to `np.ndarray` of shape `(n_inputs, embedding_dim)`.
-        Each inner list is one embedding vector (float32/64 depending on model).
-    total_duration : int | None
-        Total time in nanoseconds (includes model load + inference).
-    load_duration : int | None
-        Time to load the model into memory (ns).
-    prompt_eval_count : int | None
-        Number of tokens evaluated in the prompt(s).
-    prompt_eval_duration : int | None
-        Time spent evaluating the prompt(s) (ns).
-    raw : dict[str, Any]
-        Full raw response from Ollama (for debugging/advanced use).
-    """
-
-    model: str
-    embeddings: list[list[float]]
-    total_duration: int | None = None
-    load_duration: int | None = None
-    prompt_eval_count: int | None = None
-    prompt_eval_duration: int | None = None
-    raw: dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def n_inputs(self) -> int:
-        """Number of input texts embedded (shape[0] in NumPy terms)."""
-        return len(self.embeddings)
-
-    @property
-    def embedding_dim(self) -> int:
-        """Dimensionality of each vector (shape[1] in NumPy terms)."""
-        return len(self.embeddings[0]) if self.embeddings else 0
-
-    def to_numpy(self) -> "np.ndarray":
-        """Convert to NumPy array (lazy import — numpy is optional).
-
-        Returns
-        -------
-        np.ndarray
-            Shape: (n_inputs, embedding_dim), dtype=float32 or float64.
-        """
-        try:
-            import numpy as np
-        except ImportError as e:
-            raise ImportError(
-                "numpy is required for to_numpy(). " "Install with: pip install numpy"
-            ) from e
-        return np.array(self.embeddings, dtype=np.float32)
-
-    def cosine_similarity(self, idx1: int, idx2: int) -> float:
-        """Compute cosine similarity between two embeddings (SciPy notation).
-
-        Uses scipy.spatial.distance.cosine under the hood (lazy import).
-
-        Parameters
-        ----------
-        idx1, idx2 : int
-            Indices into self.embeddings.
-
-        Returns
-        -------
-        float
-            Cosine similarity in [-1, 1].
-        """
-        try:
-            from scipy.spatial.distance import cosine
-        except ImportError as e:
-            raise ImportError(
-                "scipy is required for cosine_similarity(). "
-                "Install with: pip install scipy"
-            ) from e
-        vec1 = self.embeddings[idx1]
-        vec2 = self.embeddings[idx2]
-        return 1.0 - cosine(vec1, vec2)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "OllamaEmbedResponse":
-        return cls(
-            model=data["model"],
-            embeddings=data.get("embeddings", []),
-            total_duration=data.get("total_duration"),
-            load_duration=data.get("load_duration"),
-            prompt_eval_count=data.get("prompt_eval_count"),
-            prompt_eval_duration=data.get("prompt_eval_duration"),
-            raw=data,
-        )

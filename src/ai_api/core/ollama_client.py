@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from ..data_structures.ollama_objects import (
     LLMStreamingChunkProtocol,
+    OllamaEmbedResponse,
     OllamaInput,
     OllamaJSONResponseSpec,
     OllamaMessage,
@@ -38,6 +39,7 @@ from ..data_structures.ollama_objects import (
 from .common.persistence import PersistenceManager
 from .ollama.chat_stream_ollama import generate_stream_and_persist
 from .ollama.chat_turn_ollama import create_turn_chat_session
+from .ollama.embeddings_ollama import EmbedOllamaClient
 
 ChatMode = Literal["turn", "stream", "batch"]
 
@@ -199,3 +201,12 @@ def OllamaClient(
         persistence_manager=persistence_manager,
         **kwargs,
     )
+
+
+class EmbedOllamaClient(BaseOllamaClient):
+    """Embeddings-only client (inherits everything from BaseOllamaClient)."""
+
+    async def create_embeddings(self, *args, **kwargs) -> "OllamaEmbedResponse":
+        from .ollama.embeddings_ollama import create_embeddings
+
+        return await create_embeddings(self, *args, **kwargs)
