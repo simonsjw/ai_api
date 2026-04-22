@@ -35,6 +35,7 @@ from ..data_structures.ollama_objects import (
     OllamaStreamingChunk,
     SaveMode,
 )
+from .client_factory import get_llm_client, register_provider
 from .common.persistence import PersistenceManager
 from .ollama.chat_stream_ollama import generate_stream_and_persist
 from .ollama.chat_turn_ollama import create_turn_chat_session
@@ -180,21 +181,11 @@ def OllamaClient(
     persistence_manager: "PersistenceManager | None" = None,
     **kwargs: Any,
 ) -> BaseOllamaClient:
-    """Factory – exactly mirrors XAIClient factory."""
-    client_map: dict[ChatMode, Type[BaseOllamaClient]] = {
-        "turn": TurnOllamaClient,
-        "stream": StreamOllamaClient,
-        "batch": BatchOllamaClient,
-    }
-
-    ClientClass = client_map.get(mode)
-    if ClientClass is None:
-        raise ValueError(
-            f"Unsupported mode '{mode}'. Must be one of: {list(client_map.keys())}"
-        )
-
-    return ClientClass(
+    """Factory – delegates to the central registry (see client_factory.py)."""
+    return get_llm_client(
+        "ollama",
         logger=logger,
+        mode=mode,
         host=host,
         timeout=timeout,
         persistence_manager=persistence_manager,
@@ -217,3 +208,8 @@ class EmbedOllamaClient(BaseOllamaClient):
             persistence_manager=self.persistence_manager,
         )
         return await create_embeddings(impl, *args, **kwargs)
+
+    # Register this provider with the central factory
+
+
+register_provider("ollama", TurnOllamaClient, StreamOllamaClient, BatchOllamaClient)

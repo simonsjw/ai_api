@@ -296,7 +296,7 @@ class OllamaRequest(BaseModel, LLMRequestProtocol):
 
 
 @dataclass(frozen=True)
-class OllamaResponse(BaseModel, LLMRequestProtocol):
+class OllamaResponse(BaseModel, LLMResponseProtocol):
     """Ollama-native response (implements LLMResponseProtocol)."""
 
     model: str

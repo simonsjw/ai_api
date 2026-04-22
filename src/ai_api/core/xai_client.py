@@ -12,6 +12,7 @@ from ..data_structures.xai_objects import (
     xAIInput,
     xAIRequest,
 )
+from .client_factory import get_llm_client, register_provider
 from .common.persistence import PersistenceManager
 from .xai.chat_batch_xai import create_batch_chat
 from .xai.chat_stream_xai import generate_stream_and_persist
@@ -162,27 +163,17 @@ def XAIClient(
     persistence_manager: "PersistenceManager" | None = None,
     **kwargs: Any,
 ) -> BaseXAIClient:
-    """Factory function returning a specialised xAI client.
-
-    Provide a persistence_manager with media_root=Path(...) for automatic media saving.
-    """
-    client_map: dict[ChatMode, Type[BaseXAIClient]] = {
-        "turn": TurnXAIClient,
-        "stream": StreamXAIClient,
-        "batch": BatchXAIClient,
-    }
-
-    ClientClass = client_map.get(mode)
-    if ClientClass is None:
-        raise ValueError(
-            f"Unsupported mode '{mode}'. Must be one of: {list(client_map.keys())}"
-        )
-
-    return ClientClass(
+    """Factory – delegates to the central registry (see client_factory.py)."""
+    return get_llm_client(
+        "xai",
         logger=logger,
+        mode=mode,
         api_key=api_key,
         base_url=base_url,
         timeout=timeout,
         persistence_manager=persistence_manager,
         **kwargs,
     )
+
+
+register_provider("xai", TurnXAIClient, StreamXAIClient, BatchXAIClient)
