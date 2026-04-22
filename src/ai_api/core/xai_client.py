@@ -135,7 +135,7 @@ class StreamXAIClient(BaseXAIClient):
 class BatchXAIClient(BaseXAIClient):
     async def create_chat(
         self,
-        messages: list[dict],
+        messages: list[list[dict]],
         model: str,
         *,
         temperature: Optional[float] = None,

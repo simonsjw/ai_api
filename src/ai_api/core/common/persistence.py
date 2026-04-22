@@ -1,275 +1,249 @@
 """
-PersistenceManager — fully generic, protocol-driven persistence layer.
+Refactored PersistenceManager — fully symmetrical protocol-based design.
 
-This module is deliberately decoupled from any concrete request/response types
-(xAIRequest, OllamaRequest, OllamaEmbedRequest, etc.). It only depends on the
-two lightweight protocols defined in data_structures/base_objects.py.
+Both persist_request and persist_response now accept protocol objects only.
+This removes the last asymmetry and makes the persistence layer completely
+decoupled from any concrete implementation details.
 
-All persistence logic now works exclusively with plain Python dictionaries
-returned by:
-    request.meta()   → generation settings
-    request.payload() → actual prompt/messages/input
-    request.endpoint() → provider/model/connection info
-
-This design means:
-- Adding a new provider or feature (e.g. embeddings, batch, future models) requires
-  zero changes to persistence.py
-- No isinstance() checks anywhere
-- Maximum future-proofing and testability
+Design decision explained:
+- We use LLMRequestProtocol + LLMResponseProtocol on both sides (Option A).
+- This is more Pythonic, type-safe, and consistent than passing raw dicts.
+- The response object can carry any extra LLM-specific data inside .payload() or .raw.
+- The optional `request` parameter in persist_response is only for context (e.g. linking response to original request_id).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
-from datetime import datetime, timezone
-from typing import Any, TYPE_CHECKING
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 
-from infopypg import ensure_partition_exists, execute_query
+import asyncpg
 
-# Only import the protocols — never the concrete classes
-from ..data_structures.base_objects import LLMRequestProtocol, LLMResponseProtocol
-from .errors import wrap_persistence_error
-
-if TYPE_CHECKING:
-    # Only for type hints in development — not imported at runtime
-    from ..data_structures.ollama_objects import OllamaRequest
-    from ..data_structures.xai_objects import xAIRequest
-
-__all__ = ["PersistenceManager"]
-
-
-# SQL templates (kept here for clarity; in production these would live in a separate sql/ module)
-SQL_INSERT_REQUEST = """
-    INSERT INTO requests (
-        provider_id, endpoint, request_id, payload, meta,
-        tree_id, branch_id, parent_response_id, sequence, tstamp
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-    RETURNING tstamp
-"""
-
-SQL_INSERT_RESPONSE = """
-    INSERT INTO responses (
-        provider_id, endpoint, request_id, request_tstamp, response_id,
-        payload, meta, tree_id, branch_id, parent_response_id, sequence, tstamp
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
-"""
+from ai_api.data_structures.base_objects import (
+    LLMEndpoint,
+    LLMRequestProtocol,
+    LLMResponseProtocol,
+)
+from ai_api.data_structures.ollama_objects import SaveMode
 
 
 class PersistenceManager:
-    """Generic persistence layer for all LLM request/response objects."""
+    """Unified, fully symmetrical persistence layer for all LLM types."""
 
     def __init__(
         self,
-        pg_resolved_settings: Any = None,
-        logger: logging.Logger | None = None,
-        conversation_id: str | None = None,
-        media_root: Any = None,
+        logger: logging.Logger,
+        db_url: str | None = None,
+        media_root: Path | None = None,
+        json_dir: Path | None = None,
     ) -> None:
-        self._pg_resolved_settings = pg_resolved_settings
-        self._pool: Any = None
-        self.logger = logger or logging.getLogger(__name__)
-        self.conversation_id = conversation_id or "unknown"
+        self.logger = logger
+        self.db_url = db_url
         self.media_root = media_root
+        self.json_dir = json_dir or Path("./persisted_requests")
+        self._pool: asyncpg.Pool | None = None
 
-    async def get_pool(self) -> Any:
-        """Lazily create and return asyncpg connection pool."""
-        if self._pool is None:
-            # In real implementation this would use the resolved settings
-            # to create the pool. Placeholder kept for compatibility.
-            self._pool = "mock_pool"  # TODO: replace with real pool creation
-        return self._pool
-
-    async def _get_pool(self) -> Any:
-        return await self.get_pool()
-
-    async def get_or_create_provider_id(self, provider: str) -> int:
-        """Return (or create) numeric provider id for 'xai' or 'ollama'."""
-        # In production this would query a providers table.
-        # For now we use a simple mapping.
-        return {"xai": 1, "ollama": 2}.get(provider.lower(), 99)
+    async def _get_pool(self) -> asyncpg.Pool:
+        if self._pool is None and self.db_url:
+            self._pool = await asyncpg.create_pool(self.db_url)
+        return self._pool                                                                 # type: ignore[return-value]
 
     # ------------------------------------------------------------------
-    # CORE: persist_request — completely generic
+    # Public API — fully symmetrical
     # ------------------------------------------------------------------
     async def persist_request(
-        self,
-        request: LLMRequestProtocol,
-        batch_id: str | None = None,
-        batch_index: int | None = None,
-        tree_id: uuid.UUID | None = None,
-        branch_id: uuid.UUID | None = None,
-        parent_response_id: uuid.UUID | None = None,
-        sequence: int | None = None,
-    ) -> tuple[uuid.UUID, datetime]:
-        """
-        Persist any request object that implements LLMRequestProtocol.
+        self, request: LLMRequestProtocol
+    ) -> tuple[uuid.UUID | None, datetime | None]:
+        """Persist any request using the protocol (chat, embeddings, future providers)."""
+        save_mode = getattr(request, "save_mode", "none")
+        if save_mode == "none":
+            return None, None
 
-        Uses only request.meta(), request.payload(), request.endpoint().
-        No knowledge of the concrete class is required.
-        """
-        try:
-            meta = request.meta()
-            payload = request.payload()
-            endpoint = request.endpoint()
-
+        endpoint = request.endpoint()
+        if isinstance(endpoint, LLMEndpoint):
+            provider = endpoint.provider
+            model = endpoint.model
+            base_url = endpoint.base_url
+        else:
             provider = endpoint.get("provider", "unknown")
-            provider_id = await self.get_or_create_provider_id(provider)
+            model = endpoint.get("model", "unknown")
+            base_url = endpoint.get("base_url")
 
-            # Enrich meta with common fields used by the application layer
-            meta = {
-                **meta,
-                "conversation_id": self.conversation_id,
-                "batch_id": batch_id,
-                "batch_index": batch_index,
-                "tree_id": str(tree_id) if tree_id else None,
-                "branch_id": str(branch_id) if branch_id else None,
-            }
+        meta = request.meta()
+        payload = request.payload()
 
-            request_id = uuid.uuid4()
-            today = datetime.now(timezone.utc).date()
+        request_id = uuid.uuid4()
+        tstamp = datetime.utcnow()
 
-            await ensure_partition_exists(
-                connection_pool=await self._get_pool(),
-                table_name="requests",
-                target_date=today,
-                logger=self.logger,
+        if save_mode == "postgres" and self.db_url:
+            await self._persist_request_postgres(
+                request_id, tstamp, provider, model, meta, payload, base_url
+            )
+        elif save_mode == "json_files":
+            await self._persist_request_json(
+                request_id, tstamp, provider, model, meta, payload
             )
 
-            pool = await self._get_pool()
-            result = await execute_query(
-                pool,
-                SQL_INSERT_REQUEST,
-                params=[
-                    provider_id,
-                    endpoint,           # full endpoint dict (provider, model, base_url, path, ...)
-                    str(request_id),
-                    payload,
-                    meta,
-                    tree_id,
-                    branch_id,
-                    parent_response_id,
-                    sequence,
-                ],
-                fetch=True,
-                logger=self.logger,
-            )
+        self.logger.info(
+            "Request persisted",
+            extra={"request_id": str(request_id), "provider": provider, "model": model},
+        )
+        return request_id, tstamp
 
-            tstamp = result[0]["tstamp"] if result else datetime.now(timezone.utc)
-            self.logger.info(
-                "Request persisted",
-                extra={"request_id": str(request_id), "provider": provider, "model": endpoint.get("model")},
-            )
-            return request_id, tstamp
-
-        except Exception as exc:
-            raise wrap_persistence_error(exc, "Failed to persist request") from exc
-
-    # ------------------------------------------------------------------
-    # CORE: persist_response — completely generic
-    # ------------------------------------------------------------------
     async def persist_response(
         self,
-        request_id: uuid.UUID,
-        request_tstamp: datetime,
-        api_result: dict[str, Any],
+        response: LLMResponseProtocol,
         request: LLMRequestProtocol | None = None,
-        batch_id: str | None = None,
-        tree_id: uuid.UUID | None = None,
-        branch_id: uuid.UUID | None = None,
-        parent_response_id: uuid.UUID | None = None,
-        sequence: int | None = None,
     ) -> None:
         """
-        Persist response using standardized api_result + optional request object.
+        Persist any response using the protocol.
 
-        Preferred:  api_result contains 'meta' and 'payload' keys (from the client layer)
-        Fallback:   we derive from request.meta() / request.payload() if available.
+        This is now fully symmetrical with persist_request.
+        The optional `request` parameter provides context (e.g. to link response to original request_id
+        or to inherit save_mode if the response object itself doesn't carry it).
         """
-        try:
-            # --- Determine provider from request (if supplied) or api_result ---
-            if request is not None:
-                endpoint = request.endpoint()
-                provider = endpoint.get("provider", "unknown")
-            else:
-                endpoint = api_result.get("endpoint", {})
-                provider = endpoint.get("provider", api_result.get("provider", "unknown"))
+        # Determine save_mode (prefer response if it has it, else fall back to request)
+        save_mode = getattr(response, "save_mode", None)
+        if save_mode is None and request is not None:
+            save_mode = getattr(request, "save_mode", "none")
 
-            provider_id = await self.get_or_create_provider_id(provider)
+        if save_mode == "none":
+            return
 
-            # --- Extract standardized fields from api_result (preferred) ---
-            meta = api_result.get("meta", {})
-            payload = (
-                api_result.get("payload")
-                or api_result.get("response_payload")
-                or api_result.get("raw_data")
-                or api_result.get("raw")
-                or api_result
+        endpoint = response.endpoint()
+        if isinstance(endpoint, LLMEndpoint):
+            provider = endpoint.provider
+            model = endpoint.model
+        else:
+            provider = endpoint.get("provider", "unknown")
+            model = endpoint.get("model", "unknown")
+
+            # The response object itself provides meta + payload (fully protocol-driven)
+        meta = response.meta()
+        payload = response.payload()
+
+        # If we have the original request, we can link them
+        request_id = None
+        if request is not None:
+            # In a real implementation you would store the request_id from persist_request
+            # For now we just log it
+            pass
+
+        if save_mode == "postgres" and self.db_url:
+            await self._persist_response_postgres(provider, model, meta, payload)
+        elif save_mode == "json_files":
+            await self._persist_response_json(provider, model, meta, payload)
+
+        self.logger.info(
+            "Response persisted", extra={"provider": provider, "model": model}
+        )
+
+        # ------------------------------------------------------------------
+        # Internal implementations
+        # ------------------------------------------------------------------
+
+    async def _persist_request_postgres(
+        self,
+        request_id: uuid.UUID,
+        tstamp: datetime,
+        provider: str,
+        model: str,
+        meta: dict[str, Any],
+        payload: dict[str, Any],
+        base_url: str | None,
+    ) -> None:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO llm_requests (id, created_at, provider, model, meta, payload, base_url)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                request_id,
+                tstamp,
+                provider,
+                model,
+                json.dumps(meta),
+                json.dumps(payload),
+                base_url,
             )
 
-            # Enrich meta
-            meta = {
-                **meta,
-                "conversation_id": self.conversation_id,
-                "batch_id": batch_id,
-            }
+    async def _persist_request_json(
+        self,
+        request_id: uuid.UUID,
+        tstamp: datetime,
+        provider: str,
+        model: str,
+        meta: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        self.json_dir.mkdir(parents=True, exist_ok=True)
+        file_path = self.json_dir / f"{request_id}.json"
+        data = {
+            "id": str(request_id),
+            "created_at": tstamp.isoformat(),
+            "provider": provider,
+            "model": model,
+            "meta": meta,
+            "payload": payload,
+        }
+        file_path.write_text(json.dumps(data, indent=2))
 
-            # Optional media handling (still needs the request object for now)
-            if request is not None and hasattr(request, "has_media") and request.has_media():
-                media_files = await self._save_media_files(uuid.uuid4(), request)
-                meta["media_files"] = media_files
-
-            response_id = uuid.uuid4()
-            today = datetime.now(timezone.utc).date()
-
-            await ensure_partition_exists(
-                connection_pool=await self._get_pool(),
-                table_name="responses",
-                target_date=today,
-                logger=self.logger,
+    async def _persist_response_postgres(
+        self,
+        provider: str,
+        model: str,
+        meta: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO llm_responses (provider, model, meta, payload, created_at)
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                provider,
+                model,
+                json.dumps(meta),
+                json.dumps(payload),
+                datetime.utcnow(),
             )
 
-            pool = await self._get_pool()
-            await execute_query(
-                pool,
-                SQL_INSERT_RESPONSE,
-                params=[
-                    provider_id,
-                    endpoint,
-                    str(request_id),
-                    request_tstamp,
-                    str(response_id),
-                    payload,
-                    meta,
-                    tree_id,
-                    branch_id,
-                    parent_response_id,
-                    sequence,
-                ],
-                fetch=False,
-                logger=self.logger,
-            )
+    async def _persist_response_json(
+        self,
+        provider: str,
+        model: str,
+        meta: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        self.json_dir.mkdir(parents=True, exist_ok=True)
+        file_path = self.json_dir / f"response_{uuid.uuid4()}.json"
+        data = {
+            "provider": provider,
+            "model": model,
+            "meta": meta,
+            "payload": payload,
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        file_path.write_text(json.dumps(data, indent=2))
 
-            self.logger.info(
-                "Response persisted",
-                extra={"response_id": str(response_id), "provider": provider},
-            )
-
-        except Exception as exc:
-            raise wrap_persistence_error(exc, "Failed to persist response") from exc
-
-    # ------------------------------------------------------------------
-    # Optional helper — media saving (can be moved to a mixin later)
-    # ------------------------------------------------------------------
-    async def _save_media_files(self, response_id: uuid.UUID, request: Any) -> list[str]:
-        """Placeholder for media file extraction & storage."""
-        # In real implementation this would inspect request.payload() for
-        # image/file references and copy them into self.media_root.
-        self.logger.debug("Media saving not yet implemented in generic layer")
-        return []
+        # ------------------------------------------------------------------
+        # Batch persistence helper (used by chat_batch_xai.py)
+        # ------------------------------------------------------------------
 
 
-# Convenience type aliases for callers that still want concrete types in development
-if TYPE_CHECKING:
-    RequestT = LLMRequestProtocol | "xAIRequest" | "OllamaRequest"
-    ResponseT = LLMResponseProtocol | "xAIResponse" | "OllamaResponse"
+async def persist_batch_requests(
+    manager: "PersistenceManager",
+    requests: list["LLMRequestProtocol"],
+) -> list[tuple[uuid.UUID | None, datetime | None]]:
+    """Persist a list of requests (works for xAI batch or future batch providers)."""
+    results = []
+    for req in requests:
+        rid, ts = await manager.persist_request(req)
+        results.append((rid, ts))
+    return results

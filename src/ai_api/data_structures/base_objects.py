@@ -48,10 +48,10 @@ class LLMRequestProtocol(Protocol):
         """
         ...
 
-    def endpoint(self) -> dict[str, Any]:
+    def endpoint(self) -> "LLMEndpoint":
         """Return provider + model + connection information.
 
-        Example:
+        Example:  TODO - UPDATE TO SHOW LLMEndpoint.
             {
                 "provider": "ollama" | "xai",
                 "model": "llama3.2" | "grok-4",
@@ -86,17 +86,17 @@ class LLMResponseProtocol(Protocol):
         """
         ...
 
-    def endpoint(self) -> dict[str, Any] | "LLMEndpoint":
+    def endpoint(self) -> "LLMEndpoint":
         """Return provider + model + connection information (same shape as request).
 
         Recommended: return an LLMEndpoint instance for richer typing and validation.
         """
         ...
 
+        # ----------------------------------------------------------------------
+        # LLMEndpoint - rich, typed endpoint descriptor
+        # ----------------------------------------------------------------------
 
-# ----------------------------------------------------------------------
-# LLMEndpoint - rich, typed endpoint descriptor
-# ----------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class LLMEndpoint:
@@ -122,7 +122,7 @@ class LLMEndpoint:
     base_url: str | None = None
     path: str | None = None
     api_type: Literal["native", "sdk", "openai_compat", "batch"] | None = None
-    extra: dict[str, Any] = field(default_factory=dict)
+    extra: Any = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to plain dict (useful for persistence / logging)."""
@@ -150,4 +150,3 @@ class LLMEndpoint:
             api_type=data.get("api_type"),
             extra=data.get("extra", {}),
         )
-

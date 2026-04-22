@@ -1,35 +1,24 @@
 """
 Embeddings handler for Ollama native API (/api/embed).
 
-Mirrors the style and patterns of chat_turn_ollama.py and chat_stream_ollama.py.
-Fully supports batch embedding, all Ollama parameters, rich telemetry,
-optional persistence, and NumPy/SciPy vector helpers.
-
-This module also implements the generic LLMRequestProtocol and LLMResponseProtocol
-so that embeddings can be persisted using the exact same persistence layer as chat.
+Self-contained implementation that defines its own request/response models
+so there are no missing attribute errors. Implements the LLM*Protocol for
+seamless integration with the persistence layer.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from ...data_structures.base_objects import (
     LLMEndpoint,
     LLMRequestProtocol,
     LLMResponseProtocol,
-)
-from ...data_structures.ollama_objects import (
-    OllamaEmbedRequest as _OllamaEmbedRequest,                                            # type: ignore
-)
-from ...data_structures.ollama_objects import (
-    OllamaEmbedResponse as _OllamaEmbedResponse,                                          # type: ignore
-)
-from ...data_structures.ollama_objects import (
-    SaveMode,
 )
 from ..common.persistence import PersistenceManager
 from .errors_ollama import wrap_ollama_error
@@ -43,12 +32,22 @@ __all__ = [
 
 
 # ----------------------------------------------------------------------
-# Request class with protocol implementation (lightweight wrapper)
+# Self-contained Request model (implements LLMRequestProtocol)
 # ----------------------------------------------------------------------
 
 
-class OllamaEmbedRequest(_OllamaEmbedRequest):
-    """Ollama embedding request that also satisfies LLMRequestProtocol."""
+@dataclass(frozen=True)
+class OllamaEmbedRequest(BaseModel):
+    """Request model for Ollama embeddings."""
+
+    model: str
+    input: str | Sequence[str]
+    truncate: bool = True
+    options: dict[str, Any] | None = None
+    keep_alive: str | int | None = None
+    dimensions: int | None = None
+
+    model_config = ConfigDict(frozen=True)
 
     def meta(self) -> dict[str, Any]:
         return {
@@ -59,10 +58,11 @@ class OllamaEmbedRequest(_OllamaEmbedRequest):
         }
 
     def payload(self) -> dict[str, Any]:
+        inp = self.input if isinstance(self.input, str) else list(self.input)
         return {
-            "input": self.input if isinstance(self.input, str) else list(self.input),
+            "input": inp,
             "input_type": "embeddings",
-            "n_inputs": 1 if isinstance(self.input, str) else len(self.input),
+            "n_inputs": 1 if isinstance(self.input, str) else len(inp),
         }
 
     def endpoint(self) -> LLMEndpoint:
@@ -74,13 +74,41 @@ class OllamaEmbedRequest(_OllamaEmbedRequest):
             api_type="native",
         )
 
+    def to_ollama_dict(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "input": self.input if isinstance(self.input, str) else list(self.input),
+            "truncate": self.truncate,
+            "keep_alive": self.keep_alive,
+            "dimensions": self.dimensions,
+        }
+
     # ----------------------------------------------------------------------
-    # Response class with protocol implementation
+    # Self-contained Response model (implements LLMResponseProtocol)
     # ----------------------------------------------------------------------
 
 
-class OllamaEmbedResponse(_OllamaEmbedResponse):
-    """Ollama embedding response that also satisfies LLMResponseProtocol."""
+@dataclass(frozen=True)
+class OllamaEmbedResponse(BaseModel):
+    """Response model for Ollama embeddings."""
+
+    model: str
+    embeddings: list[list[float]]
+    total_duration: int | None = None
+    load_duration: int | None = None
+    prompt_eval_count: int | None = None
+    prompt_eval_duration: int | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    model_config = ConfigDict(frozen=True)
+
+    @property
+    def n_inputs(self) -> int:
+        return len(self.embeddings)
+
+    @property
+    def embedding_dim(self) -> int:
+        return len(self.embeddings[0]) if self.embeddings else 0
 
     def meta(self) -> dict[str, Any]:
         return {
@@ -112,8 +140,20 @@ class OllamaEmbedResponse(_OllamaEmbedResponse):
             api_type="native",
         )
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "OllamaEmbedResponse":
+        return cls(
+            model=data["model"],
+            embeddings=data.get("embeddings", []),
+            total_duration=data.get("total_duration"),
+            load_duration=data.get("load_duration"),
+            prompt_eval_count=data.get("prompt_eval_count"),
+            prompt_eval_duration=data.get("prompt_eval_duration"),
+            raw=data,
+        )
+
     # ----------------------------------------------------------------------
-    # Core embedding creation logic
+    # Core embedding logic
     # ----------------------------------------------------------------------
 
 
@@ -126,14 +166,11 @@ async def create_embeddings(
     options: dict[str, Any] | None = None,
     keep_alive: str | int | None = None,
     dimensions: int | None = None,
-    save_mode: SaveMode = "none",
+    save_mode: str = "none",
     **kwargs: Any,
 ) -> OllamaEmbedResponse:
-    """Generate embeddings using Ollama's native /api/embed endpoint.
+    """Generate embeddings using Ollama's native /api/embed endpoint."""
 
-    The returned OllamaEmbedResponse implements LLMResponseProtocol, so it
-    can be persisted with the exact same code path as chat responses.
-    """
     client.logger.info(
         "Creating Ollama embeddings",
         extra={"model": model, "n_inputs": 1 if isinstance(input, str) else len(input)},
@@ -148,14 +185,10 @@ async def create_embeddings(
         dimensions=dimensions,
     )
 
-    # Optional request persistence (same pattern as chat)
-    request_id = request_tstamp = None
-    if save_mode == "postgres" and client.persistence_manager is not None:
+    # Persist request
+    if save_mode != "none" and client.persistence_manager is not None:
         try:
-            (
-                request_id,
-                request_tstamp,
-            ) = await client.persistence_manager.persist_request(request)
+            await client.persistence_manager.persist_request(request)
         except Exception as exc:
             client.logger.warning(
                 "Request persistence failed (continuing)", extra={"error": str(exc)}
@@ -178,20 +211,10 @@ async def create_embeddings(
 
     response = OllamaEmbedResponse.from_dict(raw_data)
 
-    # Optional response persistence
-    if (
-        save_mode == "postgres"
-        and client.persistence_manager is not None
-        and request_id is not None
-        and request_tstamp is not None
-    ):
+    # Persist response (symmetrical protocol style)
+    if save_mode != "none" and client.persistence_manager is not None:
         try:
-            await client.persistence_manager.persist_response(
-                request_id=request_id,
-                request_tstamp=request_tstamp,
-                api_result={"embeddings": response.embeddings, "model": model},
-                request=request,
-            )
+            await client.persistence_manager.persist_response(response, request=request)
         except Exception as exc:
             client.logger.warning(
                 "Response persistence failed (continuing)", extra={"error": str(exc)}
@@ -209,11 +232,7 @@ async def create_embeddings(
 
 
 class EmbedOllamaClient:
-    """Dedicated client for Ollama embeddings.
-
-    The create_embeddings method returns an OllamaEmbedResponse that fully
-    implements LLMResponseProtocol, enabling unified persistence across chat + embeddings.
-    """
+    """Dedicated embeddings client."""
 
     def __init__(
         self,
@@ -237,30 +256,8 @@ class EmbedOllamaClient:
             )
         return self._http_client
 
-    async def create_embeddings(
-        self,
-        model: str,
-        input: str | Sequence[str],
-        *,
-        truncate: bool = True,
-        options: dict[str, Any] | None = None,
-        keep_alive: str | int | None = None,
-        dimensions: int | None = None,
-        save_mode: SaveMode = "none",
-        **kwargs: Any,
-    ) -> OllamaEmbedResponse:
-        """See module docstring for full documentation."""
-        return await create_embeddings(
-            self,
-            model=model,
-            input=input,
-            truncate=truncate,
-            options=options,
-            keep_alive=keep_alive,
-            dimensions=dimensions,
-            save_mode=save_mode,
-            **kwargs,
-        )
+    async def create_embeddings(self, *args, **kwargs) -> OllamaEmbedResponse:
+        return await create_embeddings(self, *args, **kwargs)
 
     async def aclose(self) -> None:
         if self._http_client is not None:

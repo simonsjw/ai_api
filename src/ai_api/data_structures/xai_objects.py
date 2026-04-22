@@ -252,7 +252,7 @@ class xAIInput:
 
 
 @dataclass(frozen=True)
-class xAIRequest(BaseModel):
+class xAIRequest(BaseModel, LLMRequestProtocol):
     """xAI-native request (implements LLMRequestProtocol)."""
 
     model: str
@@ -347,13 +347,33 @@ class xAIRequest(BaseModel):
             data["input"] = xAIInput.from_list(data["input"])
         return cls(**data)
 
+    def to_sdk_chat_kwargs(self) -> dict[str, Any]:
+        """Required by chat_turn_xai.py and xai_client.py."""
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": self.get_messages(),
+        }
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            kwargs["max_tokens"] = self.max_tokens
+        if self.response_format:
+            kwargs["response_format"] = self.response_format.to_sdk_response_format()
+        if self.tools:
+            kwargs["tools"] = self.tools
+        return kwargs
+
+    def prepare_batch_chat(self) -> dict[str, Any]:
+        """Required by chat_batch_xai.py."""
+        return self.to_sdk_chat_kwargs()
+
     # ----------------------------------------------------------------------
     # Response (implements LLMResponseProtocol)
     # ----------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
-class xAIResponse(BaseModel):
+class xAIResponse(BaseModel, LLMResponseProtocol):
     """xAI response wrapper (implements LLMResponseProtocol)."""
 
     model: str
@@ -416,9 +436,22 @@ class xAIResponse(BaseModel):
             raw=data,
         )
 
-    # ----------------------------------------------------------------------
-    # Batch Support
-    # ----------------------------------------------------------------------
+    @classmethod
+    def from_sdk(cls, sdk_response: Any) -> "xAIResponse":
+        """Required by chat_turn_xai.py."""
+        return cls.from_dict(
+            sdk_response.model_dump()
+            if hasattr(sdk_response, "model_dump")
+            else sdk_response
+        )
+
+    def set_parsed(self, parsed: BaseModel | dict) -> None:
+        """Required by response_struct_xai.py."""
+        object.__setattr__(self, "parsed", parsed)                                        # since frozen dataclass
+
+        # ----------------------------------------------------------------------
+        # Batch Support
+        # ----------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -448,6 +481,12 @@ class xAIBatchResponse(BaseModel):
 
     def endpoint(self) -> LLMEndpoint:
         return LLMEndpoint(provider="xai", model="batch", api_type="batch")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "xAIBatchResponse":
+        """Required by chat_batch_xai.py."""
+        responses = [xAIResponse.from_dict(r) for r in data.get("responses", [])]
+        return cls(responses=responses, batch_id=data.get("batch_id"))
 
     # ----------------------------------------------------------------------
     # Streaming Chunk

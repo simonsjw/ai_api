@@ -164,7 +164,7 @@ class OllamaInput:
 
 
 @dataclass(frozen=True)
-class OllamaRequest(BaseModel):
+class OllamaRequest(BaseModel, LLMRequestProtocol):
     """Ollama-native request (implements LLMRequestProtocol)."""
 
     model: str
@@ -255,6 +255,32 @@ class OllamaRequest(BaseModel):
     def with_updates(self, **updates: Any) -> "OllamaRequest":
         return replace(self, **updates)
 
+    def to_ollama_dict(self) -> dict[str, Any]:
+        """Required by chat_turn_ollama.py and chat_stream_ollama.py."""
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": self.get_messages(),
+            "stream": False,
+        }
+        options: dict[str, Any] = {}
+        if self.temperature is not None:
+            options["temperature"] = self.temperature
+        if self.top_p is not None:
+            options["top_p"] = self.top_p
+        if self.max_tokens is not None:
+            options["num_predict"] = self.max_tokens
+        if options:
+            payload["options"] = options
+        if self.response_format:
+            fmt = self.response_format.to_ollama_format()
+            if fmt:
+                payload["format"] = fmt
+        if self.tools:
+            payload["tools"] = self.tools
+        if self.keep_alive:
+            payload["keep_alive"] = self.keep_alive
+        return {k: v for k, v in payload.items() if v is not None}
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "OllamaRequest":
         data = dict(data)
@@ -270,7 +296,7 @@ class OllamaRequest(BaseModel):
 
 
 @dataclass(frozen=True)
-class OllamaResponse(BaseModel):
+class OllamaResponse(BaseModel, LLMRequestProtocol):
     """Ollama-native response (implements LLMResponseProtocol)."""
 
     model: str
