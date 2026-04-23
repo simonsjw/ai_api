@@ -21,6 +21,7 @@ from ...data_structures.base_objects import (
     LLMResponseProtocol,
 )
 from ..common.persistence import PersistenceManager
+from ..ollama_client import BaseOllamaClient
 from .errors_ollama import wrap_ollama_error
 
 __all__ = [
@@ -231,35 +232,12 @@ async def create_embeddings(
     return response
 
 
-class EmbedOllamaClient:
-    """Dedicated embeddings client."""
+class EmbedOllamaClient(BaseOllamaClient):
+    """Dedicated embeddings client (canonical implementation).
 
-    def __init__(
-        self,
-        logger: logging.Logger,
-        host: str = "http://localhost:11434",
-        timeout: int | None = 180,
-        persistence_manager: PersistenceManager | None = None,
-    ) -> None:
-        self.host = host.rstrip("/")
-        self.timeout = timeout
-        self.logger = logger
-        self.persistence_manager = persistence_manager
-        self._http_client: httpx.AsyncClient | None = None
-
-    async def _get_http_client(self) -> httpx.AsyncClient:
-        if self._http_client is None:
-            self._http_client = httpx.AsyncClient(
-                base_url=self.host,
-                timeout=self.timeout,
-                limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
-            )
-        return self._http_client
+    Now properly inherits from BaseOllamaClient so it gets shared
+    HTTP lifecycle, logging, persistence, and aclose() for free.
+    """
 
     async def create_embeddings(self, *args, **kwargs) -> OllamaEmbedResponse:
         return await create_embeddings(self, *args, **kwargs)
-
-    async def aclose(self) -> None:
-        if self._http_client is not None:
-            await self._http_client.aclose()
-            self._http_client = None
