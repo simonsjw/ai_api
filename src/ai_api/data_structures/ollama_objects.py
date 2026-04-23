@@ -1,18 +1,102 @@
 """
 Ollama-native data models for the ai_api package.
 
-Mirrors the exact structure, validation style, and public API of xai_objects.py
-so that the rest of the package (streaming, persistence, structured output, etc.)
-can be reused with almost zero changes.
+**What it does:**
+Provides a complete, drop-in replacement for the xAI data structures so that
+the higher-level chat, streaming, structured-output, and persistence layers
+can be reused with zero (or near-zero) changes when the backend is a local
+Ollama server instead of the xAI cloud.
 
-Key transparent differences (documented inline):
-- xAI uses "input" (Responses API / SDK) → Ollama uses "messages" (standard chat format).
-- Ollama returns rich local telemetry (total_duration, prompt_eval_count, etc.).
-- Ollama supports base64 images directly in the message (no "input_image" wrapper).
-- Structured output uses "format" (json or JSON schema) instead of xAI's response_format.
-- Streaming chunks are identical via LLMStreamingChunkProtocol.
+**How it does it:**
+- Mirrors the public API of ``xai_objects.py`` (same method names, same
+  ``LLM*Protocol`` implementations, same ``SaveMode`` handling).
+- Uses Pydantic ``BaseModel`` + ``dataclass(frozen=True)`` for validation
+  and immutability exactly like the xAI side.
+- Translates between the "messages" format that Ollama expects and the
+  internal ``OllamaInput`` / ``OllamaMessage`` objects.
+- Exposes the rich local telemetry that Ollama returns (``total_duration``,
+  ``prompt_eval_count``, ``eval_count``, ``load_duration``, etc.) so that
+  monitoring of CPU/GPU, model load time, tokens-per-second, etc. can be
+  performed with a single protocol-compliant object.
+- Supports base64 images directly in user messages (Ollama native) and
+  optional ``format`` / JSON-schema structured output.
 
-All factories and helpers are named consistently with the xAI side.
+Key transparent differences from xAI (documented inline in code):
+- ``input`` (xAI)  → ``messages`` (Ollama)
+- ``response_format`` (xAI) → ``format`` (Ollama)
+- No mandatory "Extract ... JSON" system-prompt string (Ollama is more lenient)
+- Streaming chunks are 100 % compatible via ``LLMStreamingChunkProtocol``
+
+Examples
+--------
+**1. Creating a request object that can be sent to an Ollama LLM**
+
+>>> from src.ai_api.data_structures.ollama_objects import (
+...     OllamaRequest, OllamaInput, OllamaMessage, OllamaJSONResponseSpec
+... )
+>>> # Simple text
+>>> req = OllamaRequest(model="llama3.2", input="Tell me a joke")
+>>> print(req.to_ollama_dict()["messages"][0]["content"])
+'Tell me a joke'
+
+>>> # With media (base64 image – Ollama native)
+>>> import base64
+>>> img_b64 = base64.b64encode(open("cat.jpg", "rb").read()).decode()
+>>> msg = OllamaMessage(role="user", content="Describe this image", images=[img_b64])
+>>> req = OllamaRequest(model="llava", input=OllamaInput(messages=(msg,)))
+>>> print(req.has_media())
+True
+
+>>> # Structured output (JSON schema)
+>>> from pydantic import BaseModel
+>>> class Joke(BaseModel):
+...     setup: str
+...     punchline: str
+>>> spec = OllamaJSONResponseSpec(model=Joke)
+>>> req = OllamaRequest(model="llama3.2", input="Tell a joke", response_format=spec)
+>>> print(req.to_ollama_dict()["format"])  # full JSON schema dict
+
+**2. Processing a response from an Ollama LLM (including media & telemetry)**
+
+>>> from src.ai_api.data_structures.ollama_objects import parse_ollama_response
+>>> raw = {
+...     "model": "llama3.2",
+...     "created_at": "2026-04-23T...",
+...     "message": {"role": "assistant", "content": "Why did the chicken..."},
+...     "done": True,
+...     "done_reason": "stop",
+...     "total_duration": 1_234_567_890,   # nanoseconds
+...     "prompt_eval_count": 12,
+...     "eval_count": 87,
+...     "eval_duration": 987_654_321,
+... }
+>>> resp = parse_ollama_response(raw)
+>>> print(resp.text)
+'Why did the chicken...'
+>>> print(resp.meta()["total_duration"])          # raw ns for monitoring
+1234567890
+>>> print(resp.payload()["telemetry"]["eval_count"])  # 87 tokens generated
+
+**3. Monitoring software & hardware running the model (Ollama-specific)**
+
+The ``OllamaResponse`` and ``OllamaStreamingChunk`` expose the exact fields
+that Ollama returns from ``/api/chat``. These allow real-time dashboards:
+
+>>> tokens_per_sec = resp.eval_count / (resp.eval_duration / 1_000_000_000)
+>>> print(f"Generation speed: {tokens_per_sec:.1f} tok/s")
+>>> load_time_ms = (resp.load_duration or 0) / 1_000_000
+>>> print(f"Model load time: {load_time_ms:.0f} ms")   # indicates cold-start vs warm
+>>> # prompt_eval_count vs eval_count shows prefill vs decode cost
+>>> # (useful for optimising context length / batch size on GPU)
+
+All of the above works identically whether you are using the synchronous
+``chat_turn_ollama`` or the async streaming path – the objects satisfy the
+same protocols.
+
+See Also
+--------
+base_objects : the protocols this module implements
+xai_objects : the mirrored implementation for the xAI backend
 """
 
 import time
@@ -67,6 +151,28 @@ class OllamaJSONResponseSpec(BaseModel):
     Ollama uses the top-level "format" key:
       - "json" for plain JSON mode
       - dict = full JSON schema (Ollama 0.3.14+)
+
+    Parameters
+    ----------
+    model : type[BaseModel] | dict[str, Any] | None
+        Pydantic model or raw JSON schema. ``None`` disables structured output.
+    instruction : str or None
+        Optional extra system instruction (Ollama does not enforce the
+        xAI-style magic string).
+
+    Methods
+    -------
+    to_ollama_format
+        Returns the value that should be put under the ``format`` key.
+    from_ollama_response
+        Convenience parser that extracts JSON from a finished response.
+
+    Examples
+    --------
+    >>> spec = OllamaJSONResponseSpec(model={"type": "object", "properties": {...}})
+    >>> req = OllamaRequest(..., response_format=spec)
+    >>> "format" in req.to_ollama_dict()
+    True
     """
 
     model: type[BaseModel] | dict[str, Any] | None = None
@@ -97,7 +203,20 @@ class OllamaJSONResponseSpec(BaseModel):
 
 @dataclass(frozen=True)
 class OllamaMessage:
-    """Ollama message (identical public API to xAIMessage)."""
+    """Ollama message (identical public API to xAIMessage).
+
+    Parameters
+    ----------
+    role : {"system", "user", "assistant", "tool"}
+    content : str | list[dict] | None
+        Text or multimodal content list.
+    images : list[str] | None
+        List of base64-encoded images (Ollama native – no wrapper object).
+
+    Examples
+    --------
+    >>> msg = OllamaMessage(role="user", content="Hello", images=["iVBORw0KGgo..."])
+    """
 
     role: OllamaRole
     content: str | list[dict[str, Any]] | None = None
@@ -165,7 +284,47 @@ class OllamaInput:
 
 @dataclass(frozen=True)
 class OllamaRequest(BaseModel, LLMRequestProtocol):
-    """Ollama-native request (implements LLMRequestProtocol)."""
+    """Ollama-native request (implements LLMRequestProtocol).
+
+    All generation parameters are exposed as optional fields so that the
+    caller can use the same request object for both simple chat and
+    highly-tuned inference.
+
+    The ``input`` field accepts either a plain string (legacy) or an
+    ``OllamaInput`` object (recommended for multi-turn / multimodal).
+
+    Parameters
+    ----------
+    model : str
+        Ollama model tag (e.g. "llama3.2", "llava", "qwen2.5-coder").
+    input : OllamaInput | str
+        The conversation history or raw prompt.
+    temperature, top_p, top_k, ... : float | int | None
+        Standard sampling + advanced Ollama options (mirostat, think, etc.).
+    response_format : OllamaJSONResponseSpec | None
+        Structured-output specification (see class above).
+    tools : list[dict] | None
+        Tool definitions for function calling.
+    keep_alive : str | int | None
+        How long to keep the model loaded after the request (e.g. "5m").
+    save_mode : {"none", "json_files", "postgres"}
+        Persistence hint passed through to the DB layer.
+    options : dict | None
+        Raw passthrough for any undocumented Ollama parameters.
+
+    Methods
+    -------
+    meta, payload, endpoint
+        Implementations of ``LLMRequestProtocol``.
+    to_ollama_dict
+        The exact dict that should be POSTed to ``/api/chat``.
+    has_media, extract_prompt_snippet, with_updates, from_dict
+        Convenience helpers used by the chat/stream layers.
+
+    Examples
+    --------
+    See module-level docstring.
+    """
 
     model: str
     input: OllamaInput | str = Field(
@@ -382,7 +541,51 @@ class OllamaRequest(BaseModel, LLMRequestProtocol):
 
 @dataclass(frozen=True)
 class OllamaResponse(BaseModel, LLMRequestProtocol):
-    """Ollama-native response (implements LLMResponseProtocol)."""
+    """Ollama-native response (implements LLMResponseProtocol).
+
+    Note: inherits from LLMRequestProtocol in the current code base (assumed
+    correct per user instruction). In practice it fully satisfies
+    LLMResponseProtocol as well.
+
+    Contains the generated ``message``, ``done_reason``, and the full set
+    of local performance counters that Ollama exposes. These counters are
+    the primary source for hardware/software monitoring of the Ollama
+    instance (model load time, tokens/s, context utilisation, etc.).
+
+    Parameters
+    ----------
+    model, created_at, message, done, done_reason : ...
+    total_duration, load_duration, prompt_eval_count, ... : int | None
+        All timing values are in **nanoseconds**. Convert by dividing by
+        1_000_000 for milliseconds or 1_000_000_000 for seconds.
+    parsed : BaseModel | dict | None
+        Populated by the structured-output post-processor when a
+        ``response_format`` was supplied.
+
+    Properties
+    ----------
+    text : str
+        Convenience accessor for ``message["content"]``.
+    tool_calls : list[dict]
+        Convenience accessor for ``message["tool_calls"]``.
+
+    Methods
+    -------
+    meta, payload, endpoint
+        Protocol implementations (rich telemetry included in both).
+    from_dict, extract_response_snippet
+        Helpers used by the client layer.
+
+    Examples
+    --------
+    See module-level "Processing a response" example.
+    Hardware monitoring:
+
+    >>> resp = parse_ollama_response(raw_from_ollama)
+    >>> gen_speed = resp.eval_count / (resp.eval_duration / 1e9)
+    >>> model_load_ms = (resp.load_duration or 0) / 1e6
+    >>> print(f"{gen_speed:.1f} tok/s, model loaded in {model_load_ms:.0f} ms")
+    """
 
     model: str
     created_at: str
@@ -397,7 +600,6 @@ class OllamaResponse(BaseModel, LLMRequestProtocol):
     prompt_eval_duration: int | None = None
     eval_count: int | None = None
     eval_duration: int | None = None
-
     raw: dict[str, Any] = field(default_factory=dict)
     parsed: BaseModel | dict | None = None
 
@@ -475,7 +677,18 @@ class OllamaResponse(BaseModel, LLMRequestProtocol):
 
 @dataclass(frozen=True)
 class OllamaStreamingChunk:
-    """Implements LLMStreamingChunkProtocol — drop-in compatible with xAI streaming code."""
+    """Implements LLMStreamingChunkProtocol — drop-in compatible with xAI streaming code.
+
+    On the final chunk (``is_final=True``) the telemetry fields
+    (``done_reason``, ``total_duration``) are populated so that the same
+    monitoring logic used for non-streaming responses can be applied.
+
+    Parameters
+    ----------
+    text, finish_reason, tool_calls_delta, is_final, raw : ...
+    done_reason, total_duration : ...
+        Only meaningful on the final chunk.
+    """
 
     text: str = ""
     finish_reason: str | None = None

@@ -1,39 +1,94 @@
 """
 xAI SDK data models for the ai_api package.
 
-This module defines clean, type-safe dataclasses and Pydantic models that map
-directly to the official xAI Python SDK (`xai_sdk`). These structures serve as
-the canonical abstraction layer for constructing requests, handling responses,
-and configuring features such as structured JSON output, multimodal content,
-and streaming.
+**What it does:**
+Defines the canonical, type-safe data structures that map 1:1 onto the
+official ``xai_sdk`` Python client. These classes are the single source of
+truth for every xAI interaction (chat, streaming, batch, structured output,
+multimodal).
 
-All public classes and helpers translate seamlessly into the parameters and
-objects expected by `xai_sdk.AsyncClient.chat.create()` (and related methods)
-via dedicated conversion methods (e.g., `to_api_kwargs()`, `to_sdk_response_format()`).
+**How it does it:**
+- Uses Pydantic ``BaseModel`` (frozen) + ``dataclass(frozen=True)`` for
+  validation and immutability.
+- Implements the three methods of ``LLMRequestProtocol`` /
+  ``LLMResponseProtocol`` so that the rest of the package (persistence,
+  streaming aggregator, structured-output post-processor) stays provider-
+  agnostic.
+- Provides ``to_sdk_chat_kwargs()`` and ``to_sdk_response_format()`` that
+  produce exactly the arguments expected by
+  ``xai_sdk.AsyncClient.chat.create()``.
+- Supports the modern multimodal content format
+  (``input_text`` / ``input_image`` / ``input_file``) that the xAI Responses
+  API expects.
+- Exposes ``parsed`` attribute on responses so that JSON-mode output can be
+  automatically validated against a Pydantic model.
 
-Public exports (via ``__all__``) include:
+All higher-level code (``chat_turn_xai.py``, ``response_struct_xai.py``,
+batch runners, etc.) consumes these objects exclusively; the SDK is never
+called directly from application logic.
 
-- **Request models**: ``xAIMessage``, ``xAIInput``, ``xAIRequest``
-- **Structured output**: ``xAIJSONResponseSpec``
-- **Batch support**: ``xAIBatchRequest``, ``xAIBatchResponse``
-- **Streaming & protocol**: ``xAIStreamingChunk``, ``LLMStreamingChunkProtocol``
-- **Supporting types**: ``SaveMode``, ``Role``
+Examples
+--------
+**Creating a request object that can be sent to xAI**
 
-Design principles:
-- Full compatibility with the xAI Responses API / OpenAI-compatible endpoint.
-- Direct support for the official SDK client patterns.
-- Immutable, validated data structures with helper methods for safe usage.
-- Extensible persistence configuration via ``SaveMode``.
+>>> from src.ai_api.data_structures.xai_objects import (
+...     xAIRequest, xAIInput, xAIMessage, xAIJSONResponseSpec
+... )
+>>> from pydantic import BaseModel
 
-Application code interacts primarily with ``xAIRequest`` and ``xAIResponse``
-while the lower-level models ensure correct mapping to the xAI SDK.
+>>> class City(BaseModel):
+...     name: str
+...     population: int
 
-Multimodal attachment (now the canonical way for turn/stream modes):
-    content = [
-        {"type": "input_text", "text": "Describe this"},
-        {"type": "input_image", "image_url": "https://... or /local/path.jpg"},
-        {"type": "input_file",  "file_url": "/local/path.pdf"}
-    ]
+>>> spec = xAIJSONResponseSpec(model=City)
+>>> req = xAIRequest(
+...     model="grok-2-latest",
+...     input="Tell me about Paris",
+...     response_format=spec,
+...     temperature=0.3,
+...     max_tokens=200
+... )
+>>> kwargs = req.to_sdk_chat_kwargs()
+>>> print(kwargs["response_format"]["type"])
+'json_schema'
+
+**Multimodal request (image + text)**
+
+>>> content = [
+...     {"type": "input_text", "text": "What is in this image?"},
+...     {"type": "input_image", "image_url": "https://example.com/cat.jpg"},
+... ]
+>>> msg = xAIMessage(role="user", content=content)
+>>> req = xAIRequest(model="grok-2-vision", input=xAIInput(messages=(msg,)))
+>>> print(req.has_media())
+True
+
+**Processing a response (including parsed structured output)**
+
+>>> from src.ai_api.data_structures.xai_objects import xAIResponse
+>>> raw = {
+...     "model": "grok-2-latest",
+...     "choices": [{"message": {"content": '{"name": "Paris", "population": 2100000}'}}],
+...     "usage": {"prompt_tokens": 42, "completion_tokens": 18}
+... }
+>>> resp = xAIResponse.from_dict(raw)
+>>> print(resp.text)
+'{"name": "Paris", "population": 2100000}'
+>>> parsed = City.model_validate_json(resp.text)   # or use the post-processor
+>>> resp.set_parsed(parsed)
+>>> print(resp.payload()["parsed"].name)
+'Paris'
+
+**Embeddings / media references**
+If the model is instructed (via tools or JSON schema) to return embeddings
+or references to generated media, they appear in ``payload()["parsed"]`` or
+``tool_calls``. The base protocol guarantees the shape; concrete handling
+lives in the structured-output layer.
+
+See Also
+--------
+base_objects : the protocols this module satisfies
+ollama_objects : the mirrored local-backend implementation
 """
 
 import time
@@ -112,6 +167,21 @@ class xAIJSONResponseSpec(BaseModel):
         output.
     instruction: str | None
         An optional custom system instruction to produce JSON formatted responses.
+
+    Methods
+    -------
+    to_sdk_response_format
+        Produces the exact dict expected under ``response_format`` by the SDK.
+    from_xai_response
+        Convenience parser that extracts and validates JSON from a finished
+        response.
+
+    Examples
+    --------
+    >>> spec = xAIJSONResponseSpec(model=City)
+    >>> req = xAIRequest(..., response_format=spec)
+    >>> "json_schema" in req.to_sdk_chat_kwargs()["response_format"]["type"]
+    True
     """
 
     model: type[BaseModel] | dict[str, Any] | None = None
@@ -166,7 +236,22 @@ class xAIJSONResponseSpec(BaseModel):
 
 @dataclass(frozen=True)
 class xAIMessage:
-    """Immutable message supporting text, images, and file attachments."""
+    """Immutable message supporting text, images, and file attachments.
+
+    Parameters
+    ----------
+    role : {"system", "user", "assistant", "developer"}
+    content : str | list[dict[str, Any]]
+        Either plain text or the multimodal content list
+        (``input_text``, ``input_image``, ``input_file``).
+
+    Examples
+    --------
+    >>> msg = xAIMessage(role="user", content=[
+    ...     {"type": "input_text", "text": "Describe"},
+    ...     {"type": "input_image", "image_url": "https://..."}
+    ... ])
+    """
 
     role: Role
     content: str | list[dict[str, Any]]
@@ -248,7 +333,32 @@ class xAIInput:
 
 @dataclass(frozen=True)
 class xAIRequest(BaseModel, LLMRequestProtocol):
-    """xAI-native request (implements LLMRequestProtocol)."""
+    """xAI-native request (implements LLMRequestProtocol).
+
+    Parameters
+    ----------
+    model : str
+        xAI model name (e.g. "grok-2-latest", "grok-2-vision").
+    input : xAIInput | str
+        Conversation history or raw prompt.
+    temperature, max_tokens : float | int | None
+    response_format : xAIJSONResponseSpec | None
+        Structured-output spec (automatically adds the required system
+        instruction).
+    tools, save_mode, base_url, prompt_cache_key : ...
+        Standard options.
+
+    Methods
+    -------
+    meta, payload, endpoint
+        Protocol implementations.
+    to_sdk_chat_kwargs, prepare_batch_chat, has_media, ...
+        Helpers used by the xAI client layer.
+
+    Examples
+    --------
+    See module-level examples.
+    """
 
     model: str
     input: xAIInput | str = Field(..., description="Accepts str or xAIInput")
@@ -369,7 +479,27 @@ class xAIRequest(BaseModel, LLMRequestProtocol):
 
 @dataclass(frozen=True)
 class xAIResponse(BaseModel, LLMResponseProtocol):
-    """xAI response wrapper (implements LLMResponseProtocol)."""
+    """xAI response wrapper (implements LLMResponseProtocol).
+
+    Parameters
+    ----------
+    model, created_at, choices, usage, raw, parsed : ...
+        ``choices[0]["message"]["content"]`` is the generated text.
+        ``parsed`` is populated after structured-output validation.
+
+    Properties
+    ----------
+    text, tool_calls : convenience accessors.
+
+    Methods
+    -------
+    meta, payload, endpoint, from_dict, from_sdk, set_parsed
+        Full protocol + client-layer helpers.
+
+    Examples
+    --------
+    See module-level "Processing a response" example.
+    """
 
     model: str
     created_at: str | None = None
