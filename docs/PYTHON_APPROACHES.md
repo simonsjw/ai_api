@@ -1,8 +1,7 @@
 # Python Approaches in the ai_api Project
 
-This document explains the key design patterns and language features used throughout the `ai_api` project. It is written for an intelligent reader with intermediate Python knowledge who wants to understand *why* certain choices were made and how they help us build a clean, extensible library for working with multiple LLM providers (Ollama, xAI, and future additions).
+This document explains the key design patterns and language features used throughout the `ai_api` project. It is written for a reader with intermediate Python knowledge who wants to understand *why* certain choices were made and how they help us build a clean, extensible library for working with multiple LLM providers (Ollama, xAI, and future additions).
 
-Australian English is used throughout.
 
 ---
 
@@ -61,13 +60,14 @@ These features allow us to write code that is both flexible and self-documenting
 
 ### How They Help This Project
 
-| Approach       | Primary Use in ai_api                              | Benefit |
-|----------------|----------------------------------------------------|---------|
-| Decorators     | `@dataclass(frozen=True)`, `@property`, `@classmethod`, `@runtime_checkable` | Clean immutable data, computed properties, class-level behaviour, runtime protocol checking |
-| Protocols      | `LLMRequestProtocol`, `LLMResponseProtocol`, `LLMProviderAdapter` | Duck typing with static type checking — no inheritance required |
-| ABC            | (Used lightly) `LLMProviderAdapter` was originally an ABC before we moved to Protocol | Nominal inheritance when we want explicit "is-a" relationships |
-| Pydantic       | `BaseModel` inheritance in request/response objects | Runtime validation + excellent editor support |
-| Dataclasses    | `OllamaRequest`, `xAIRequest`, `LLMEndpoint`       | Simple, immutable data containers with generated `__init__`, `__repr__`, etc. |
+| Approach    | Primary Use in ai_api                                                                 | Benefit                                                                                     |
+|-------------|---------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------|
+| Decorators  | `@dataclass(frozen=True)`, `@property`, `@classmethod`, `@runtime_checkable`          | Clean immutable data, computed properties, class-level behaviour, runtime protocol checking |
+| Protocols   | `LLMRequestProtocol`, `LLMResponseProtocol`, `LLMProviderAdapter`                     | Duck typing with static type checking — no inheritance required                             |
+| ABC         | (Used lightly) `LLMProviderAdapter` was originally an ABC before we moved to Protocol | Nominal inheritance when we want explicit "is-a" relationships                              |
+| Pydantic    | `BaseModel` inheritance in request/response objects                                   | Runtime validation + excellent editor support                                               |
+| Dataclasses | `OllamaRequest`, `xAIRequest`, `LLMEndpoint`                                          | Simple, immutable data containers with generated `__init__`, `__repr__`, etc.               |
+|             |                                                                                       |                                                                                             |
 
 ---
 
@@ -188,13 +188,13 @@ class LLMProviderAdapter(ABC):
 
 ### Comparison
 
-| Aspect                    | Protocol                              | ABC                                   |
-|---------------------------|---------------------------------------|---------------------------------------|
-| Typing style              | Structural (duck typing)              | Nominal (inheritance)                 |
-| Must inherit?             | No                                    | Yes                                   |
-| Runtime `isinstance`      | Only with `@runtime_checkable`        | Always works                          |
-| Best for                  | Flexible interfaces, data contracts   | Frameworks, plugin systems, "is-a"    |
-| Our usage                 | `LLM*Protocol`, `LLMProviderAdapter`  | Originally used for `LLMProviderAdapter` (later changed to Protocol) |
+| Aspect               | Protocol                             | ABC                                                                  |
+|----------------------|--------------------------------------|----------------------------------------------------------------------|
+| Typing style         | Structural (duck typing)             | Nominal (inheritance)                                                |
+| Must inherit?        | No                                   | Yes                                                                  |
+| Runtime `isinstance` | Only with `@runtime_checkable`       | Always works                                                         |
+| Best for             | Flexible interfaces, data contracts  | Frameworks, plugin systems, "is-a"                                   |
+| Our usage            | `LLM*Protocol`, `LLMProviderAdapter` | Originally used for `LLMProviderAdapter` (later changed to Protocol) |
 
 In this project we prefer **Protocols** for most interfaces because they give us maximum flexibility while still providing excellent static type checking. We only reach for ABC when we want explicit inheritance or shared implementation.
 
@@ -214,13 +214,13 @@ Key features we use:
 
 ### Alternative Approaches
 
-| Approach              | Pros                                      | Cons                                      | When we might use it |
-|-----------------------|-------------------------------------------|-------------------------------------------|----------------------|
-| Plain `dataclass`     | Zero dependencies, fast, immutable option | No runtime validation                     | Simple internal data |
-| `TypedDict`           | Lightweight, type-checker friendly        | No runtime validation                     | When we only need static types |
-| `attrs`               | Similar to dataclasses + validators       | Another dependency                        | Legacy codebases |
-| Manual `if` checks    | Full control                              | Verbose, error-prone                      | Almost never         |
-| Pydantic `BaseModel`  | Validation + great DX                     | Small performance cost, dependency        | Our request/response objects |
+| Approach             | Pros                                      | Cons                               | When we might use it           |
+|----------------------|-------------------------------------------|------------------------------------|--------------------------------|
+| Plain `dataclass`    | Zero dependencies, fast, immutable option | No runtime validation              | Simple internal data           |
+| `TypedDict`          | Lightweight, type-checker friendly        | No runtime validation              | When we only need static types |
+| `attrs`              | Similar to dataclasses + validators       | Another dependency                 | Legacy codebases               |
+| Manual `if` checks   | Full control                              | Verbose, error-prone               | Almost never                   |
+| Pydantic `BaseModel` | Validation + great DX                     | Small performance cost, dependency | Our request/response objects   |
 
 ### Comparison with `db_responses_schema.py`
 
@@ -247,8 +247,3 @@ This separation gives us clean boundaries and makes it easy to swap storage back
 - `LLMEndpoint` is a frozen dataclass that can be converted to/from dictionaries — this makes it easy to store in Postgres while still having nice Python objects in memory.
 - The project deliberately avoids deep inheritance hierarchies. Most classes are small and focused. Composition + protocols are preferred over inheritance.
 
----
-
-This document should give you a solid foundation for understanding the architectural decisions in the `ai_api` project. Future documentation will cover specific modules and usage patterns in more detail.
-
-If anything here is unclear or you would like examples expanded, please let us know.
