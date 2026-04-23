@@ -115,6 +115,76 @@ class BaseOllamaClient:
             )
             return {}
 
+    async def list_models(self) -> list[dict[str, Any]]:
+        """List all models available in the local Ollama instance.
+
+        Wraps GET /api/tags.
+        Returns a list of dicts with keys like: name, size, digest, modified_at, details, etc.
+        """
+        http_client = await self._get_http_client()
+        try:
+            resp = await http_client.get("/api/tags")
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("models", [])
+        except Exception as exc:
+            self.logger.error("Failed to list Ollama models", extra={"error": str(exc)})
+            raise
+
+    async def pull_model(
+        self, name: str, stream: bool = False
+    ) -> dict[str, Any] | AsyncIterator[dict[str, Any]]:
+        """Pull (download) a model from the Ollama registry.
+
+        Wraps POST /api/pull.
+
+        Args:
+            name: Model name (e.g. "llama3.2", "qwen2.5:7b", "deepseek-r1:8b")
+            stream: If True, yields progress dicts as they arrive.
+                    If False, waits for completion and returns final status.
+
+        Returns:
+            Final status dict (when stream=False) or async iterator of progress chunks.
+        """
+        http_client = await self._get_http_client()
+        payload = {"name": name, "stream": stream}
+
+        try:
+            if stream:
+                async with http_client.stream(
+                    "POST", "/api/pull", json=payload
+                ) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if line.strip():
+                            yield json.loads(line)
+            else:
+                resp = await http_client.post("/api/pull", json=payload)
+                resp.raise_for_status()
+                return resp.json()
+        except Exception as exc:
+            self.logger.error(f"Failed to pull model {name}", extra={"error": str(exc)})
+            raise
+
+    async def show_model(self, name: str) -> dict[str, Any]:
+        """Get detailed information about a specific model.
+
+        Wraps POST /api/show.
+        Returns the full response including: license, modelfile, parameters,
+        template, details, etc.
+
+        Note: `get_model_options()` is a convenience wrapper that extracts
+        just the generation parameters from this endpoint.
+        """
+        http_client = await self._get_http_client()
+        try:
+            resp = await http_client.post("/api/show", json={"model": name})
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as exc:
+            self.logger.error(f"Failed to show model {name}", extra={"error": str(exc)})
+            raise
+
 
 class TurnOllamaClient(BaseOllamaClient):
     async def create_chat(
