@@ -12,6 +12,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any, Literal, Optional, Type
 
+import httpx
 from pydantic import BaseModel
 from xai_sdk import AsyncClient as XAIAsyncClient
 
@@ -46,7 +47,7 @@ class BaseXAIClient:
         self.timeout = timeout
         self.logger = logger
         self.persistence_manager = persistence_manager
-        self._http_client = None
+        self._http_client: httpx.AsyncClient | None = None
         self._sdk_client: XAIAsyncClient | None = None
 
     async def _get_sdk_client(self) -> XAIAsyncClient:
@@ -54,8 +55,62 @@ class BaseXAIClient:
             self._sdk_client = XAIAsyncClient(api_key=self.api_key)
         return self._sdk_client
 
+    async def _get_http_client(self) -> httpx.AsyncClient:
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=self.timeout,
+                headers={"Authorization": f"Bearer {self.api_key}"},
+            )
+        return self._http_client
+
     async def aclose(self) -> None:
-        pass
+        if self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
+
+    async def list_models(self) -> list[dict[str, Any]]:
+        """List all available Grok models via the xAI API (/v1/models).
+
+        Returns a list of model objects with id, created, owned_by, etc.
+        This provides parity with Ollama's get_model_options().
+        """
+        http_client = await self._get_http_client()
+        try:
+            resp = await http_client.get("/v1/models")
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("data", [])
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to list xAI models via HTTP", extra={"error": str(exc)}
+            )
+            # Fallback to known Grok models
+            return [
+                {"id": "grok-4", "created": 1730000000, "owned_by": "xai"},
+                {"id": "grok-3", "created": 1725000000, "owned_by": "xai"},
+                {"id": "grok-2", "created": 1720000000, "owned_by": "xai"},
+            ]
+
+    async def get_model_info(self, model: str) -> dict[str, Any]:
+        """Get detailed information about a specific Grok model.
+
+        Provides closer parity with Ollama's get_model_options(model).
+        Returns model metadata (id, created, owned_by, capabilities if available).
+        """
+        http_client = await self._get_http_client()
+        try:
+            resp = await http_client.get(f"/v1/models/{model}")
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            # Fallback: search in the list
+            all_models = await self.list_models()
+            for m in all_models:
+                if m.get("id") == model:
+                    return m
+            self.logger.warning(f"Model '{model}' not found in xAI catalog")
+            return {"id": model, "error": "Model not found or details unavailable"}
 
 
 class TurnXAIClient(BaseXAIClient):
@@ -67,7 +122,7 @@ class TurnXAIClient(BaseXAIClient):
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         save_mode: SaveMode = "none",
-        response_model: Type[BaseModel] | None = None,                                    # ← NEW
+        response_model: Type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> Any:
         if self._sdk_client is None:

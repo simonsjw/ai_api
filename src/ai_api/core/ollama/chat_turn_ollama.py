@@ -1,9 +1,12 @@
 """
-Example of updated chat_turn_ollama.py using the new symmetrical persistence pattern.
+Fixed version of chat_turn_ollama.py with proper structured output (response_model) support.
 
-Key change:
-    OLD: await persistence.persist_response(request_id=..., request_tstamp=..., api_result=..., request=request)
-    NEW: await persistence.persist_response(response, request=request)
+Changes:
+- Added `response_model` parameter to create_turn_chat_session (matching TurnOllamaClient).
+- Converts Pydantic model to OllamaJSONResponseSpec (which sets the top-level "format" key with JSON schema).
+- Passes response_format to OllamaRequest.
+- Updated docstring.
+- Supports both explicit response_model and response_format via **kwargs for flexibility.
 """
 
 from __future__ import annotations
@@ -14,13 +17,16 @@ from typing import Any, Type
 import httpx
 from pydantic import BaseModel
 
-from ...data_structures.ollama_objects import OllamaRequest, OllamaResponse
+from ...data_structures.ollama_objects import (
+    OllamaJSONResponseSpec,
+    OllamaRequest,
+    OllamaResponse,
+)
 from ..common.persistence import PersistenceManager
-from ..common.response_struct import create_json_response_spec
 
 
 async def create_turn_chat_session(
-    client: Any,
+    client: Any,  # OllamaClient or similar
     messages: list[dict],
     model: str = "llama3.2",
     *,
@@ -30,10 +36,40 @@ async def create_turn_chat_session(
     response_model: Type[BaseModel] | None = None,
     **kwargs: Any,
 ) -> OllamaResponse:
-    """Create a turn-based chat session with Ollama (with structured output support)."""
+    """Create a turn-based chat session with Ollama (updated persistence pattern).
+
+    Supports structured JSON output via:
+        - response_model: A Pydantic BaseModel subclass (recommended convenience)
+        - response_format: OllamaJSONResponseSpec or raw dict/schema (via **kwargs)
+
+    Example:
+        class Person(BaseModel):
+            name: str
+            age: int
+
+        response = await client.create_chat(
+            messages=[{"role": "user", "content": "Extract info"}],
+            model="llama3.2",
+            response_model=Person,
+        )
+        # response.parsed will be the validated Person instance (if you post-process)
+    """
 
     logger = client.logger
     logger.info("Creating turn-based Ollama chat", extra={"model": model})
+
+    # Handle structured output
+    response_format: OllamaJSONResponseSpec | None = None
+    if response_model is not None:
+        response_format = OllamaJSONResponseSpec(model=response_model)
+    elif "response_format" in kwargs:
+        # Allow direct passing of OllamaJSONResponseSpec or dict via **kwargs
+        rf = kwargs.pop("response_format")
+        if isinstance(rf, dict):
+            response_format = OllamaJSONResponseSpec(model=rf)
+        elif isinstance(rf, OllamaJSONResponseSpec):
+            response_format = rf
+        # else: let it be handled by OllamaRequest validation if possible
 
     # 1. Build request
     request = OllamaRequest(
@@ -42,20 +78,11 @@ async def create_turn_chat_session(
         temperature=temperature,
         max_tokens=max_tokens,
         save_mode=save_mode,
+        response_format=response_format,
         **kwargs,
     )
 
-    # 2. Handle structured output (correct way)
-    if response_model is not None:
-        spec = create_json_response_spec("ollama", response_model)
-        # Update the request object so persistence sees the format
-        request = request.model_copy(
-            update={
-                "response_format": spec
-            }                                                                             # or add a dedicated `format` field if you prefer
-        )
-
-        # 3. Persist request (using protocol object - this is correct)
+    # 2. Persist request (protocol style)
     if save_mode != "none" and client.persistence_manager is not None:
         try:
             await client.persistence_manager.persist_request(request)
@@ -64,24 +91,18 @@ async def create_turn_chat_session(
                 "Request persistence failed (continuing)", extra={"error": str(exc)}
             )
 
-            # 4. Build final payload for Ollama API
+    # 3. Call Ollama
+    http_client = await client._get_http_client()
     payload = request.to_ollama_dict()
     payload["stream"] = False
 
-    # Add format if structured output was requested
-    if response_model is not None:
-        spec = create_json_response_spec("ollama", response_model)
-        payload["format"] = spec.to_ollama_format()
-
-        # 5. Call Ollama
-    http_client = await client._get_http_client()
     resp = await http_client.post("/api/chat", json=payload)
     resp.raise_for_status()
     raw_data = resp.json()
 
     response = OllamaResponse.from_dict(raw_data)
 
-    # 6. Persist response (using protocol object - this is correct)
+    # 4. Persist response (NEW symmetrical protocol style)
     if save_mode != "none" and client.persistence_manager is not None:
         try:
             await client.persistence_manager.persist_response(response, request=request)

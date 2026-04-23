@@ -59,6 +59,12 @@ class OllamaClientError(OllamaError, AIClientError):
     pass
 
 
+class OllamaGPUMemoryWarning(OllamaError, AIClientError):
+    """Internal errors within OllamaClient due to GPU Memory constraints."""
+
+    pass
+
+
 # Convenience wrappers (used by chat_*_ollama.py and ollama_client.py)
 def wrap_ollama_error(exc: Exception, message: str) -> OllamaError:
     """Generic wrapper for any Ollama-related exception."""
@@ -70,5 +76,12 @@ def wrap_ollama_error(exc: Exception, message: str) -> OllamaError:
 def wrap_ollama_api_error(exc: Exception, message: str) -> OllamaAPIError:
     """Wrap errors from httpx calls to Ollama."""
     wrapped = OllamaAPIError(message, details={"original": type(exc).__name__})
+    wrapped.__cause__ = exc
+    return wrapped
+
+
+def wrap_ollama_gpu_mem_error(exc: Exception, message: str) -> OllamaGPUMemoryWarning:
+    """Wrap errors from GPU memory issues in Ollama."""
+    wrapped = OllamaGPUMemoryWarning(message, details={"original": type(exc).__name__})
     wrapped.__cause__ = exc
     return wrapped

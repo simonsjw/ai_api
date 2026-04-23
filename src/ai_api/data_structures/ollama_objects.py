@@ -25,13 +25,7 @@ from typing import Any, Literal, Protocol, Sequence, Type, TypeVar, cast
 from pydantic import BaseModel, ConfigDict, Field
 
 # Import the new generic protocols
-from .base_objects import (
-    LLMEndpoint,
-    LLMRequestProtocol,
-    LLMResponseProtocol,
-    LLMStreamingChunkProtocol,
-    SaveMode,
-)
+from .base_objects import LLMEndpoint, LLMRequestProtocol, LLMResponseProtocol
 
 T = TypeVar("T", bound="OllamaJSONResponseSpec")
 
@@ -49,6 +43,8 @@ __all__: list[str] = [
     "LLMResponseProtocol",                                                                # re-exported
 ]
 
+# Re-export the shared protocol and type so existing code imports from here unchanged
+from .xai_objects import LLMStreamingChunkProtocol, SaveMode                              # type: ignore
 
 type OllamaRole = Literal["system", "user", "assistant", "tool"]
 
@@ -79,9 +75,6 @@ class OllamaJSONResponseSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     def to_ollama_format(self) -> dict[str, Any] | str | None:
-        """
-        Convert to the format expected by Ollama's /api/chat endpoint.
-        """
         if self.model is None:
             return None
         if isinstance(self.model, dict):
@@ -180,14 +173,33 @@ class OllamaRequest(BaseModel, LLMRequestProtocol):
     )
     temperature: float | None = None
     top_p: float | None = None
+    top_k: int | None = None
+    seed: int | None = None
     max_tokens: int | None = None                                                         # maps to 'num_predict' in Ollama options
+    repeat_penalty: float | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+    num_ctx: int | None = None
+    stop: list[str] | None = None
+    mirostat: int | None = None                                                           # 0, 1, or 2
+    mirostat_tau: float | None = None
+    mirostat_eta: float | None = None
+    min_p: float | None = None
+    typical_p: float | None = None
+    penalize_newline: bool | None = None
+    repeat_last_n: int | None = None
+    num_keep: int | None = None
+    think: bool | None = None                                                             # for thinking models (Ollama 0.5+)
     response_format: OllamaJSONResponseSpec | None = None
     tools: list[dict[str, Any]] | None = None
     keep_alive: str | int | None = None
     save_mode: SaveMode = "none"
     prompt_cache_key: str | None = None                                                   # kept for API parity
+    options: dict[str, Any] | None = (
+        None                                                                              # raw passthrough for any future/undocumented params
+    )
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="allow")
 
     def __post_init__(self) -> None:
         if self.response_format is not None:
@@ -204,13 +216,30 @@ class OllamaRequest(BaseModel, LLMRequestProtocol):
         return {
             "temperature": self.temperature,
             "top_p": self.top_p,
+            "top_k": self.top_k,
+            "seed": self.seed,
             "max_tokens": self.max_tokens,
+            "repeat_penalty": self.repeat_penalty,
+            "presence_penalty": self.presence_penalty,
+            "frequency_penalty": self.frequency_penalty,
+            "num_ctx": self.num_ctx,
+            "stop": self.stop,
+            "mirostat": self.mirostat,
+            "mirostat_tau": self.mirostat_tau,
+            "mirostat_eta": self.mirostat_eta,
+            "min_p": self.min_p,
+            "typical_p": self.typical_p,
+            "penalize_newline": self.penalize_newline,
+            "repeat_last_n": self.repeat_last_n,
+            "num_keep": self.num_keep,
+            "think": self.think,
             "response_format": self.response_format.to_ollama_format()
             if self.response_format
             else None,
             "tools": self.tools,
             "keep_alive": self.keep_alive,
             "save_mode": self.save_mode,
+            "options": self.options,
         }
 
     def payload(self) -> dict[str, Any]:
@@ -270,14 +299,62 @@ class OllamaRequest(BaseModel, LLMRequestProtocol):
             "stream": False,
         }
         options: dict[str, Any] = {}
+
+        # Core sampling
         if self.temperature is not None:
             options["temperature"] = self.temperature
         if self.top_p is not None:
             options["top_p"] = self.top_p
+        if self.top_k is not None:
+            options["top_k"] = self.top_k
+        if self.seed is not None:
+            options["seed"] = self.seed
         if self.max_tokens is not None:
             options["num_predict"] = self.max_tokens
+
+            # Repetition control
+        if self.repeat_penalty is not None:
+            options["repeat_penalty"] = self.repeat_penalty
+        if self.presence_penalty is not None:
+            options["presence_penalty"] = self.presence_penalty
+        if self.frequency_penalty is not None:
+            options["frequency_penalty"] = self.frequency_penalty
+        if self.repeat_last_n is not None:
+            options["repeat_last_n"] = self.repeat_last_n
+        if self.penalize_newline is not None:
+            options["penalize_newline"] = self.penalize_newline
+
+            # Context & stopping
+        if self.num_ctx is not None:
+            options["num_ctx"] = self.num_ctx
+        if self.num_keep is not None:
+            options["num_keep"] = self.num_keep
+        if self.stop is not None:
+            options["stop"] = self.stop
+
+            # Mirostat sampling
+        if self.mirostat is not None:
+            options["mirostat"] = self.mirostat
+        if self.mirostat_tau is not None:
+            options["mirostat_tau"] = self.mirostat_tau
+        if self.mirostat_eta is not None:
+            options["mirostat_eta"] = self.mirostat_eta
+
+            # Advanced
+        if self.min_p is not None:
+            options["min_p"] = self.min_p
+        if self.typical_p is not None:
+            options["typical_p"] = self.typical_p
+        if self.think is not None:
+            options["think"] = self.think
+
+            # Raw passthrough (highest priority — can override anything above)
+        if self.options:
+            options.update(self.options)
+
         if options:
             payload["options"] = options
+
         if self.response_format:
             fmt = self.response_format.to_ollama_format()
             if fmt:
@@ -286,6 +363,7 @@ class OllamaRequest(BaseModel, LLMRequestProtocol):
             payload["tools"] = self.tools
         if self.keep_alive:
             payload["keep_alive"] = self.keep_alive
+
         return {k: v for k, v in payload.items() if v is not None}
 
     @classmethod
@@ -303,7 +381,7 @@ class OllamaRequest(BaseModel, LLMRequestProtocol):
 
 
 @dataclass(frozen=True)
-class OllamaResponse(BaseModel, LLMResponseProtocol):
+class OllamaResponse(BaseModel, LLMRequestProtocol):
     """Ollama-native response (implements LLMResponseProtocol)."""
 
     model: str
