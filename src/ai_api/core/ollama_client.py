@@ -11,8 +11,9 @@ Fully supports:
 - Streaming (with real-time persistence)
 - Structured JSON output via OllamaJSONResponseSpec
 - Multimodal (base64 images in messages)
-- Batching (simulated via concurrent turn calls — Ollama has no native batch endpoint)
-- Embeddings via EmbedOllamaClient
+- Batching (simulated via concurrent turn calls)
+- Embeddings via EmbedOllamaClient (distinct from chat)
+- Model management: list_models(), pull_model(), show_model(), get_model_options()
 - Your existing PersistenceManager (reused unchanged)
 - Same SaveMode, logging pattern, and error wrapping style
 """
@@ -119,7 +120,7 @@ class BaseOllamaClient:
         """List all models available in the local Ollama instance.
 
         Wraps GET /api/tags.
-        Returns a list of dicts with keys like: name, size, digest, modified_at, details, etc.
+        Returns a list of dicts with keys: name, size, digest, modified_at, details, etc.
         """
         http_client = await self._get_http_client()
         try:
@@ -141,7 +142,7 @@ class BaseOllamaClient:
         Args:
             name: Model name (e.g. "llama3.2", "qwen2.5:7b", "deepseek-r1:8b")
             stream: If True, yields progress dicts as they arrive.
-                    If False, waits for completion and returns final status.
+                    If False, waits for completion and returns final status dict.
 
         Returns:
             Final status dict (when stream=False) or async iterator of progress chunks.
@@ -151,17 +152,23 @@ class BaseOllamaClient:
 
         try:
             if stream:
-                async with http_client.stream(
-                    "POST", "/api/pull", json=payload
-                ) as resp:
-                    resp.raise_for_status()
-                    async for line in resp.aiter_lines():
-                        if line.strip():
-                            yield json.loads(line)
-            else:
-                resp = await http_client.post("/api/pull", json=payload)
-                resp.raise_for_status()
-                return resp.json()
+
+                async def _stream_generator():
+                    async with http_client.stream(
+                        "POST", "/api/pull", json=payload
+                    ) as resp:
+                        resp.raise_for_status()
+                        async for line in resp.aiter_lines():
+                            if line.strip():
+                                yield json.loads(line)
+
+                return _stream_generator()
+
+            # Non-streaming path (no yield keyword in this execution path)
+            resp = await http_client.post("/api/pull", json=payload)
+            resp.raise_for_status()
+            return resp.json()
+
         except Exception as exc:
             self.logger.error(f"Failed to pull model {name}", extra={"error": str(exc)})
             raise
