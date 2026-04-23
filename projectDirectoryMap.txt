@@ -1,5 +1,7 @@
 .
 ├── docs
+│   ├── PYTHON_APPROACHES.md
+│   ├── README_EMBEDDING.md
 │   ├── README_PERSISTANCE.md
 │   ├── README_STREAMING.md
 │   └── README_TURNBASED.md
@@ -8,27 +10,30 @@
 │       ├── core
 │       │   ├── common
 │       │   │   ├── errors.py
-│       │   │   └── persistence.py
+│       │   │   ├── persistence.py
+│       │   │   └── response_struct.py
 │       │   ├── ollama
 │       │   │   ├── chat_stream_ollama.py
 │       │   │   ├── chat_turn_ollama.py
+│       │   │   ├── embeddings_ollama.py
 │       │   │   └── errors_ollama.py
 │       │   ├── xai
 │       │   │   ├── chat_batch_xai.py
 │       │   │   ├── chat_stream_xai.py
 │       │   │   ├── chat_turn_xai.py
-│       │   │   ├── errors_xai.py
-│       │   │   └── response_struct_xai.py
+│       │   │   └── errors_xai.py
+│       │   ├── base_provider.py
+│       │   ├── client_factory.py
 │       │   ├── ollama_client.py
 │       │   └── xai_client.py
 │       └── data_structures
+│           ├── base_objects.py
 │           ├── db_responses_schema.py
 │           ├── ollama_objects.py
 │           └── xai_objects.py
 ├── environment_grok.yml
 ├── .gitignore
 ├── projectDirectoryMap.txt
-├── pyproject.toml
-└── tree.txt
+└── pyproject.toml
 
-9 directories, 23 files
+9 directories, 28 files
