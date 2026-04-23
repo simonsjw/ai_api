@@ -1,8 +1,37 @@
 """
 Ollama-specific error hierarchy.
 
-Mirrors the exact style of errors_xai.py for consistency.
-Reuses the shared generic base from ../errors.py.
+This module mirrors the style of ``errors_xai.py`` for consistency across
+providers while reusing the shared generic base classes from
+``core/common/errors.py``.
+
+High-level view
+---------------
+- All Ollama errors inherit from ``OllamaError`` (which inherits from
+  ``AIAPIError``).
+- API-level errors (connection, invalid request) are separated from
+  client-internal errors.
+- A dedicated ``OllamaGPUMemoryWarning`` exists because local Ollama
+  deployments frequently hit GPU memory limits — this is much less common
+  with the remote xAI service.
+
+Comparison with xAI errors
+--------------------------
+- Ollama: simpler taxonomy focused on local HTTP/API issues + GPU memory.
+- xAI: much richer set (gRPC, authentication, rate limits, thinking mode,
+  multimodal, cache, batch-specific errors) because it is a remote managed
+  service with more failure modes.
+
+All wrapper functions follow the same pattern as the common wrappers so that
+every caught exception is turned into a properly typed, context-rich error
+with ``__cause__`` set.
+
+See Also
+--------
+ai_api.core.common.errors
+    The provider-agnostic base classes and wrappers.
+ai_api.core.xai.errors_xai
+    The xAI counterpart (more error types).
 """
 
 from __future__ import annotations
@@ -24,8 +53,10 @@ __all__: list[str] = [
     "OllamaAPIConnectionError",
     "OllamaAPIInvalidRequestError",
     "OllamaClientError",
+    "OllamaGPUMemoryWarning",
     "wrap_ollama_error",
     "wrap_ollama_api_error",
+    "wrap_ollama_gpu_mem_error",
 ]
 
 
@@ -54,34 +85,70 @@ class OllamaAPIInvalidRequestError(OllamaAPIError):
 
 
 class OllamaClientError(OllamaError, AIClientError):
-    """Internal errors within OllamaClient."""
+    """Internal errors within OllamaClient (validation, state, usage)."""
 
     pass
 
 
 class OllamaGPUMemoryWarning(OllamaError, AIClientError):
-    """Internal errors within OllamaClient due to GPU Memory constraints."""
+    """GPU memory pressure or out-of-memory condition on the local Ollama host."""
 
     pass
 
 
 # Convenience wrappers (used by chat_*_ollama.py and ollama_client.py)
 def wrap_ollama_error(exc: Exception, message: str) -> OllamaError:
-    """Generic wrapper for any Ollama-related exception."""
+    """Generic wrapper for any Ollama-related exception.
+
+    Parameters
+    ----------
+    exc : Exception
+        The original exception.
+    message : str
+        Contextual message.
+
+    Returns
+    -------
+    OllamaError
+    """
     wrapped = OllamaError(message, details={"original": type(exc).__name__})
     wrapped.__cause__ = exc
     return wrapped
 
 
 def wrap_ollama_api_error(exc: Exception, message: str) -> OllamaAPIError:
-    """Wrap errors from httpx calls to Ollama."""
+    """Wrap errors from httpx calls to Ollama.
+
+    Parameters
+    ----------
+    exc : Exception
+        The original exception (usually httpx.HTTPError).
+    message : str
+        Contextual message.
+
+    Returns
+    -------
+    OllamaAPIError
+    """
     wrapped = OllamaAPIError(message, details={"original": type(exc).__name__})
     wrapped.__cause__ = exc
     return wrapped
 
 
 def wrap_ollama_gpu_mem_error(exc: Exception, message: str) -> OllamaGPUMemoryWarning:
-    """Wrap errors from GPU memory issues in Ollama."""
+    """Wrap errors from GPU memory issues in Ollama.
+
+    Parameters
+    ----------
+    exc : Exception
+        The original exception (usually CUDA / torch OOM).
+    message : str
+        Contextual message.
+
+    Returns
+    -------
+    OllamaGPUMemoryWarning
+    """
     wrapped = OllamaGPUMemoryWarning(message, details={"original": type(exc).__name__})
     wrapped.__cause__ = exc
     return wrapped

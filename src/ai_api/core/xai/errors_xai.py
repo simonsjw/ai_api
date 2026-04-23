@@ -1,9 +1,39 @@
 """
-xAI-specific error hierarchy.
+xAI-specific error hierarchy with full backward compatibility.
 
-All original public names (xAIError, xAIAPIError, wrap_xai_api_error, etc.)
-are preserved for 100 % backward compatibility with your existing xAI code.
-The generic parts are now imported from the shared core/errors.py.
+This module preserves every original public name from earlier versions of the
+library (``xAIError``, ``xAIAPIError``, ``wrap_xai_api_error``, etc.) while
+delegating the generic parts to the shared ``core/common/errors.py``.
+
+High-level view of xAI error handling
+-------------------------------------
+- Re-exports generic errors under their historical xAI names
+  (e.g. ``xAIInfopypgError`` → ``AIPersistenceError``).
+- Adds xAI-specific API errors that inherit from ``xAIAPIError`` (which
+  inherits from ``AIAPIError``).
+- Includes gRPC-aware subclasses when the ``grpc`` package is available
+  (xAI uses gRPC under the hood for some transports).
+- Client-specific errors cover remote-service concerns: thinking mode,
+  multimodal inputs, caching, batch failures, rate limits, authentication.
+
+Comparison with Ollama errors
+-----------------------------
+- xAI: rich taxonomy reflecting a managed remote service (gRPC, rate limits,
+  auth, thinking/multimodal/cache-specific errors, batch errors).
+- Ollama: simpler set focused on local HTTP + a dedicated GPU-memory warning
+  (much more relevant for local deployments).
+- Both inherit from the same common base, so ``except AIAPIError`` catches
+  everything from either provider.
+
+All wrappers set ``__cause__`` and populate a ``details`` dict for excellent
+debuggability and logging.
+
+See Also
+--------
+ai_api.core.common.errors
+    The canonical generic error classes and wrappers.
+ai_api.core.ollama.errors_ollama
+    The simpler Ollama counterpart.
 """
 
 from __future__ import annotations
@@ -14,14 +44,14 @@ from typing import Any
 try:
     import asyncpg
 except ImportError:
-    asyncpg = None                                                                        # type: ignore[assignment]
+    asyncpg = None  # type: ignore[assignment]
 
 try:
     import grpc
 except ImportError:
-    grpc = None                                                                           # type: ignore[assignment]
+    grpc = None  # type: ignore[assignment]
 
-    # NEW: import shared generic base
+# NEW: import shared generic base
 from ..common.errors import (
     AIAPIError,
     AIClientError,
@@ -124,24 +154,32 @@ class xAIAPIRateLimitError(xAIAPIError):
 
 # xAI-specific client errors
 class xAIClientError(AIClientError):
-    """Internal xAIClient errors."""
+    """Internal xAIClient errors (validation, state, usage)."""
 
     pass
 
 
 class UnsupportedThinkingModeError(xAIClientError):
+    """Requested thinking mode is not supported by the current model or SDK version."""
+
     pass
 
 
 class xAIClientBatchError(xAIClientError):
+    """Error specific to batch processing (e.g. mismatched response_model list length)."""
+
     pass
 
 
 class xAIClientMultimodalError(xAIClientError):
+    """Error related to multimodal (image/video) input handling."""
+
     pass
 
 
 class xAIClientCacheError(xAIClientError):
+    """Error related to prompt caching or context caching features."""
+
     pass
 
 
@@ -151,7 +189,20 @@ wrap_postgres_error = wrap_database_error
 
 
 def wrap_xai_api_error(exc: Exception, message: str) -> xAIAPIError:
-    """Wrap any xAI SDK / gRPC exception."""
+    """Wrap any xAI SDK / gRPC exception.
+
+    Parameters
+    ----------
+    exc : Exception
+        The original exception (often a gRPC or httpx error).
+    message : str
+        Contextual message describing the operation that failed.
+
+    Returns
+    -------
+    xAIAPIError
+        Properly typed exception with ``__cause__`` and ``details``.
+    """
     wrapped = xAIAPIError(message, details={"original": type(exc).__name__})
     wrapped.__cause__ = exc
     return wrapped

@@ -1,7 +1,35 @@
 """
-Example of updated chat_stream_xai.py using the new symmetrical persistence pattern.
+xAI streaming chat implementation (SDK-based) with symmetrical persistence.
 
-For streaming, we persist the FINAL response object (after accumulating chunks).
+This module implements token-by-token streaming for xAI using the official
+SDK's async iterator. It is the concrete implementation behind the streaming
+path of ``xAIClient``.
+
+High-level view of xAI streaming
+--------------------------------
+- Consumes an async iterator from the xAI SDK (``async for chunk in chat``).
+- Yields raw chunks immediately for real-time UX.
+- Accumulates text; on the final chunk, builds a complete ``xAIResponse``
+  and (optionally) validates it against a ``response_model``.
+- Persists only the final assembled response (the request was persisted
+  by the caller before streaming started).
+
+Comparison with Ollama streaming
+--------------------------------
+- xAI: SDK async iterator, final response constructed from accumulated
+  chunks + raw metadata, supports thinking mode and richer error types.
+- Ollama: native HTTP streaming with per-chunk telemetry (durations),
+  local execution, more generation parameters.
+- Both use the identical persistence pattern (persist final response only)
+  and the same structured-output helper from ``common/response_struct.py``.
+
+See Also
+--------
+ai_api.core.xai_client
+ai_api.core.xai.chat_turn_xai
+    The non-streaming counterpart.
+ai_api.core.ollama.chat_stream_ollama
+    The Ollama streaming implementation (native HTTP).
 """
 
 from __future__ import annotations
@@ -24,7 +52,26 @@ async def generate_stream_and_persist(
     save_mode: str = "none",
     response_model: Type[BaseModel] | None = None,
 ) -> AsyncIterator[Any]:
-    """Streaming with new symmetrical persistence pattern."""
+    """Stream tokens from xAI and persist the final assembled response.
+
+    Parameters
+    ----------
+    logger : logging.Logger
+    persistence_manager : PersistenceManager or None
+    chat : Any
+        The xAI SDK async chat iterator (already started).
+    request : xAIRequest
+        The original request (used for context and persistence linking).
+    save_mode : {"none", "json_files", "postgres"}, optional
+    response_model : type[pydantic.BaseModel] or None, optional
+        If supplied, the accumulated text is validated and attached as
+        ``.parsed`` on the final response.
+
+    Yields
+    ------
+    xAIStreamingChunk (or raw SDK chunk)
+        Real-time tokens.
+    """
 
     # 1. Create JSON response spec.
     if response_model is not None:

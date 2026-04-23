@@ -1,9 +1,45 @@
 """
-Example of updated chat_turn_xai.py using the new symmetrical persistence pattern.
+xAI turn-based (non-streaming) chat implementation (SDK-based).
 
-Key change:
-    OLD: await persistence.persist_response(request_id=..., request_tstamp=..., api_result=..., request=request)
-    NEW: await persistence.persist_response(response, request=request)
+This module provides the core logic for single-turn chat completions against
+the xAI API using the official xAI SDK. It is the concrete implementation
+behind the turn-based path of ``xAIClient``.
+
+High-level view of xAI turn-based functionality
+-----------------------------------------------
+- Receives a pre-configured xAI SDK client (``sdk_client``) from the outer
+  ``xAIClient``.
+- Builds an ``xAIRequest`` (which implements ``LLMRequestProtocol``).
+- Supports structured JSON output via ``xAIJSONResponseSpec`` (created by
+  the common helper).
+- Uses symmetrical persistence (persist request before call, persist final
+  response after).
+- After the SDK call, optionally validates the response text against a
+  Pydantic ``response_model`` and attaches the parsed instance.
+
+Comparison with Ollama turn-based chat
+--------------------------------------
+- xAI: remote SDK call, structured output attached via ``response_format``
+  on the SDK request, richer remote-specific error handling (see
+  ``errors_xai.py``).
+- Ollama: direct HTTP to localhost, more generation parameters exposed
+  (num_ctx, repeat_penalty, think, etc.), local execution, native
+  embeddings support.
+- Both now share the exact same persistence and structured-output patterns
+  for consistency.
+
+The function is intentionally thin — request construction, persistence, and
+structured-output parsing are delegated to reusable components.
+
+See Also
+--------
+ai_api.core.xai_client (the public client)
+ai_api.core.xai.chat_stream_xai
+    The streaming counterpart.
+ai_api.core.xai.chat_batch_xai
+    xAI-specific batch support (not present in Ollama).
+ai_api.core.ollama.chat_turn_ollama
+    The Ollama equivalent (native HTTP).
 """
 
 from __future__ import annotations
@@ -30,7 +66,29 @@ async def create_turn_chat_session(
     response_model: Type[BaseModel] | None = None,
     **kwargs: Any,
 ) -> xAIResponse:
-    """Create a turn-based chat session with xAI (updated persistence pattern)."""
+    """Create a turn-based (non-streaming) chat session with xAI via the SDK.
+
+    Parameters
+    ----------
+    client : Any
+        Outer client providing ``logger`` and ``persistence_manager``.
+    sdk_client : Any
+        The xAI SDK chat client (usually ``client._sdk_client``).
+    messages : list[dict]
+        Chat history in OpenAI-compatible format.
+    model : str, optional
+        xAI model name (default "grok-4").
+    temperature, max_tokens, save_mode, **kwargs
+        Generation parameters forwarded to ``xAIRequest``.
+    response_model : type[pydantic.BaseModel] or None, optional
+        Pydantic model for structured output. Converted to
+        ``xAIJSONResponseSpec`` internally.
+
+    Returns
+    -------
+    xAIResponse
+        Completed response (with optional ``.parsed`` attribute).
+    """
 
     logger = client.logger
     logger.info("Creating turn-based xAI chat", extra={"model": model})

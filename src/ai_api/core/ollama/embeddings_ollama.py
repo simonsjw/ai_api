@@ -1,9 +1,39 @@
 """
-Embeddings handler for Ollama native API (/api/embed).
+Ollama embeddings implementation (native /api/embed endpoint).
 
-Self-contained implementation that defines its own request/response models
-so there are no missing attribute errors. Implements the LLM*Protocol for
-seamless integration with the persistence layer.
+This module provides a complete, self-contained embeddings solution for Ollama.
+It defines its own request and response models that implement the
+``LLMRequestProtocol`` and ``LLMResponseProtocol`` so they integrate
+seamlessly with the shared persistence layer.
+
+High-level view of Ollama embeddings
+------------------------------------
+- Calls the dedicated ``/api/embed`` endpoint (not the chat endpoint).
+- Supports single string or list of strings as input.
+- Returns rich telemetry: total_duration, load_duration, prompt_eval_count,
+  embedding dimension, etc.
+- Full support for ``save_mode`` (json_files or postgres) via the protocol
+  methods.
+- Exposes a thin ``EmbedOllamaClient`` wrapper for convenience.
+
+Ollama vs xAI embeddings
+------------------------
+- Ollama: native local endpoint, detailed performance telemetry, supports
+  ``dimensions`` and ``truncate`` parameters, no remote latency.
+- xAI: does not expose a dedicated embeddings module in this codebase
+  (embeddings would be handled via the chat endpoint or a future xAI
+  embeddings client). Ollama is currently the only provider with a
+  first-class embeddings implementation.
+
+The request/response dataclasses are frozen Pydantic models for immutability
+and type safety.
+
+See Also
+--------
+ai_api.core.ollama_client.EmbedOllamaClient
+    Public client that delegates to ``create_embeddings``.
+ai_api.data_structures.base_objects
+    The protocols implemented by ``OllamaEmbedRequest`` / ``OllamaEmbedResponse``.
 """
 
 from __future__ import annotations
@@ -21,7 +51,6 @@ from ...data_structures.base_objects import (
     LLMResponseProtocol,
 )
 from ..common.persistence import PersistenceManager
-from ..ollama_client import BaseOllamaClient
 from .errors_ollama import wrap_ollama_error
 
 __all__ = [
@@ -39,7 +68,26 @@ __all__ = [
 
 @dataclass(frozen=True)
 class OllamaEmbedRequest(BaseModel):
-    """Request model for Ollama embeddings."""
+    """Request model for Ollama embeddings.
+
+    Implements ``LLMRequestProtocol`` so it can be persisted identically
+    to chat requests.
+
+    Parameters
+    ----------
+    model : str
+        Ollama model name (must support embeddings, e.g. "nomic-embed-text").
+    input : str or Sequence[str]
+        Single text or list of texts to embed.
+    truncate : bool, optional
+        Whether to truncate inputs that exceed context (default True).
+    options : dict or None, optional
+        Additional model options.
+    keep_alive : str, int or None, optional
+        How long to keep the model loaded (e.g. "5m", 300).
+    dimensions : int or None, optional
+        Desired embedding dimensionality (if supported by model).
+    """
 
     model: str
     input: str | Sequence[str]
@@ -51,6 +99,7 @@ class OllamaEmbedRequest(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     def meta(self) -> dict[str, Any]:
+        """Return generation / embedding settings for persistence."""
         return {
             "truncate": self.truncate,
             "dimensions": self.dimensions,
@@ -59,6 +108,7 @@ class OllamaEmbedRequest(BaseModel):
         }
 
     def payload(self) -> dict[str, Any]:
+        """Return the actual input texts for persistence."""
         inp = self.input if isinstance(self.input, str) else list(self.input)
         return {
             "input": inp,
@@ -67,6 +117,7 @@ class OllamaEmbedRequest(BaseModel):
         }
 
     def endpoint(self) -> LLMEndpoint:
+        """Return structured endpoint information."""
         return LLMEndpoint(
             provider="ollama",
             model=self.model,
@@ -76,6 +127,7 @@ class OllamaEmbedRequest(BaseModel):
         )
 
     def to_ollama_dict(self) -> dict[str, Any]:
+        """Convert to the exact payload expected by /api/embed."""
         return {
             "model": self.model,
             "input": self.input if isinstance(self.input, str) else list(self.input),
@@ -84,14 +136,29 @@ class OllamaEmbedRequest(BaseModel):
             "dimensions": self.dimensions,
         }
 
-    # ----------------------------------------------------------------------
-    # Self-contained Response model (implements LLMResponseProtocol)
-    # ----------------------------------------------------------------------
+
+# ----------------------------------------------------------------------
+# Self-contained Response model (implements LLMResponseProtocol)
+# ----------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class OllamaEmbedResponse(BaseModel):
-    """Response model for Ollama embeddings."""
+    """Response model for Ollama embeddings.
+
+    Implements ``LLMResponseProtocol``. Contains rich telemetry not
+    usually exposed by other providers.
+
+    Attributes
+    ----------
+    model : str
+    embeddings : list[list[float]]
+        The actual embedding vectors.
+    total_duration, load_duration, prompt_eval_count, prompt_eval_duration : int or None
+        Ollama-native performance counters (nanoseconds).
+    raw : dict
+        The complete raw response from Ollama.
+    """
 
     model: str
     embeddings: list[list[float]]
@@ -105,13 +172,16 @@ class OllamaEmbedResponse(BaseModel):
 
     @property
     def n_inputs(self) -> int:
+        """Number of input texts that were embedded."""
         return len(self.embeddings)
 
     @property
     def embedding_dim(self) -> int:
+        """Dimensionality of each embedding vector."""
         return len(self.embeddings[0]) if self.embeddings else 0
 
     def meta(self) -> dict[str, Any]:
+        """Return metadata for persistence."""
         return {
             "model": self.model,
             "n_inputs": self.n_inputs,
@@ -121,6 +191,7 @@ class OllamaEmbedResponse(BaseModel):
         }
 
     def payload(self) -> dict[str, Any]:
+        """Return the embeddings and derived telemetry for persistence."""
         return {
             "embeddings": self.embeddings,
             "n_inputs": self.n_inputs,
@@ -133,6 +204,7 @@ class OllamaEmbedResponse(BaseModel):
         }
 
     def endpoint(self) -> LLMEndpoint:
+        """Return structured endpoint information (same as request)."""
         return LLMEndpoint(
             provider="ollama",
             model=self.model,
@@ -143,6 +215,7 @@ class OllamaEmbedResponse(BaseModel):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "OllamaEmbedResponse":
+        """Construct from the raw JSON returned by /api/embed."""
         return cls(
             model=data["model"],
             embeddings=data.get("embeddings", []),
@@ -153,9 +226,10 @@ class OllamaEmbedResponse(BaseModel):
             raw=data,
         )
 
-    # ----------------------------------------------------------------------
-    # Core embedding logic
-    # ----------------------------------------------------------------------
+
+# ----------------------------------------------------------------------
+# Core embedding logic
+# ----------------------------------------------------------------------
 
 
 async def create_embeddings(
@@ -170,7 +244,26 @@ async def create_embeddings(
     save_mode: str = "none",
     **kwargs: Any,
 ) -> OllamaEmbedResponse:
-    """Generate embeddings using Ollama's native /api/embed endpoint."""
+    """Generate embeddings using Ollama's native /api/embed endpoint.
+
+    This is the function called by ``EmbedOllamaClient.create_embeddings``.
+
+    Parameters
+    ----------
+    client : EmbedOllamaClient
+        Client instance providing logger, HTTP client, and persistence manager.
+    model : str
+        Ollama embedding model.
+    input : str or Sequence[str]
+        Text(s) to embed.
+    truncate, options, keep_alive, dimensions, save_mode, **kwargs
+        Forwarded to ``OllamaEmbedRequest``.
+
+    Returns
+    -------
+    OllamaEmbedResponse
+        Response containing the embeddings and rich telemetry.
+    """
 
     client.logger.info(
         "Creating Ollama embeddings",
@@ -232,12 +325,50 @@ async def create_embeddings(
     return response
 
 
-class EmbedOllamaClient(BaseOllamaClient):
-    """Dedicated embeddings client (canonical implementation).
+class EmbedOllamaClient:
+    """Dedicated embeddings client for Ollama.
 
-    Now properly inherits from BaseOllamaClient so it gets shared
-    HTTP lifecycle, logging, persistence, and aclose() for free.
+    Provides the same lifecycle (``_get_http_client``, ``aclose``) as the
+    chat clients and a thin ``create_embeddings`` wrapper.
+
+    Parameters
+    ----------
+    logger : logging.Logger
+    host : str, optional
+        Ollama base URL (default "http://localhost:11434").
+    timeout : int or None, optional
+        Request timeout in seconds.
+    persistence_manager : PersistenceManager or None, optional
+        Shared persistence instance.
     """
 
+    def __init__(
+        self,
+        logger: logging.Logger,
+        host: str = "http://localhost:11434",
+        timeout: int | None = 180,
+        persistence_manager: PersistenceManager | None = None,
+    ) -> None:
+        self.host = host.rstrip("/")
+        self.timeout = timeout
+        self.logger = logger
+        self.persistence_manager = persistence_manager
+        self._http_client: httpx.AsyncClient | None = None
+
+    async def _get_http_client(self) -> httpx.AsyncClient:
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(
+                base_url=self.host,
+                timeout=self.timeout,
+                limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            )
+        return self._http_client
+
     async def create_embeddings(self, *args, **kwargs) -> OllamaEmbedResponse:
+        """Convenience wrapper around the module-level ``create_embeddings``."""
         return await create_embeddings(self, *args, **kwargs)
+
+    async def aclose(self) -> None:
+        if self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None

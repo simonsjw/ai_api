@@ -1,9 +1,61 @@
 """
-xai_client.py — updated with response_model support for all modes (including batch).
+High-level asynchronous client for xAI (remote) using the official SDK.
 
-Changes:
-- BatchXAIClient.create_chat now accepts response_model (single or list)
-- XAIClient factory accepts and forwards response_model
+This module provides the public-facing ``XAIClient`` factory and the three
+mode-specific client classes (``TurnXAIClient``, ``StreamXAIClient``,
+``BatchXAIClient``). It mirrors the public API of ``ollama_client.py`` so
+providers are interchangeable.
+
+High-level responsibilities
+---------------------------
+- Expose a consistent ``create_chat(messages, model, mode=..., response_model=..., save_mode=...)`` API.
+- Delegate to provider-specific modules in ``xai/``:
+  - ``chat_turn_xai.py`` for non-streaming
+  - ``chat_stream_xai.py`` for streaming
+  - ``chat_batch_xai.py`` for native batch (unique to xAI — supports per-request ``response_model`` lists)
+- Use ``PersistenceManager`` from ``common/persistence.py`` for symmetrical persistence.
+- Support structured JSON output via ``response_model`` (Pydantic) using the common helper.
+- Provide xAI-specific methods: ``list_models()``, ``get_model_info()``.
+
+How it uses the rest of core/
+-----------------------------
+- Imports ``PersistenceManager`` and error wrappers from ``common/``.
+- Imports concrete implementations from ``xai/chat_*.py``.
+- The ``XAIClient(...)`` factory is automatically registered with
+  ``client_factory.py`` at import time.
+- All returned objects satisfy ``LLMProviderAdapter`` (from ``base_provider.py``).
+
+Comparison with Ollama client
+-----------------------------
+- xAI: SDK-based, native batch with flexible per-request structured output,
+  richer remote error taxonomy (rate limits, thinking mode, multimodal, cache).
+- Ollama: native HTTP, many low-level generation parameters, native embeddings
+  + model management, simulated batching, GPU-memory warning.
+
+Example usage
+-------------
+.. code-block:: python
+
+    from ai_api.core.xai_client import XAIClient
+    from ai_api.core.common.persistence import PersistenceManager
+    import logging
+
+    logger = logging.getLogger(__name__)
+    pm = PersistenceManager(logger=logger, db_url=...)
+
+    client = XAIClient(
+        logger=logger,
+        api_key="xai-...",
+        mode="batch",
+        persistence_manager=pm
+    )
+
+    results = await client.create_chat(
+        messages_list=[conv1, conv2, conv3],
+        model="grok-4",
+        response_model=[Person, Summary, None],   # different model per request
+        save_mode="postgres"
+    )
 """
 
 from __future__ import annotations
@@ -31,7 +83,7 @@ ChatMode = Literal["turn", "stream", "batch"]
 
 
 class BaseXAIClient:
-    """Shared base class containing HTTP client lifecycle logic."""
+    """Shared base class containing SDK + HTTP client lifecycle logic."""
 
     def __init__(
         self,
@@ -70,11 +122,7 @@ class BaseXAIClient:
             self._http_client = None
 
     async def list_models(self) -> list[dict[str, Any]]:
-        """List all available Grok models via the xAI API (/v1/models).
-
-        Returns a list of model objects with id, created, owned_by, etc.
-        This provides parity with Ollama's get_model_options().
-        """
+        """List all available Grok models via the xAI API (/v1/models)."""
         http_client = await self._get_http_client()
         try:
             resp = await http_client.get("/v1/models")
@@ -85,7 +133,6 @@ class BaseXAIClient:
             self.logger.warning(
                 "Failed to list xAI models via HTTP", extra={"error": str(exc)}
             )
-            # Fallback to known Grok models
             return [
                 {"id": "grok-4", "created": 1730000000, "owned_by": "xai"},
                 {"id": "grok-3", "created": 1725000000, "owned_by": "xai"},
@@ -93,18 +140,13 @@ class BaseXAIClient:
             ]
 
     async def get_model_info(self, model: str) -> dict[str, Any]:
-        """Get detailed information about a specific Grok model.
-
-        Provides closer parity with Ollama's get_model_options(model).
-        Returns model metadata (id, created, owned_by, capabilities if available).
-        """
+        """Get detailed information about a specific Grok model."""
         http_client = await self._get_http_client()
         try:
             resp = await http_client.get(f"/v1/models/{model}")
             resp.raise_for_status()
             return resp.json()
         except Exception:
-            # Fallback: search in the list
             all_models = await self.list_models()
             for m in all_models:
                 if m.get("id") == model:
@@ -149,7 +191,7 @@ class StreamXAIClient(BaseXAIClient):
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         save_mode: SaveMode = "none",
-        response_model: Type[BaseModel] | None = None,                                    # ← NEW
+        response_model: Type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[LLMStreamingChunkProtocol]:
         sdk_client = await self._get_sdk_client()
@@ -189,9 +231,7 @@ class BatchXAIClient(BaseXAIClient):
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         save_mode: SaveMode = "none",
-        response_model: list[Type[BaseModel]]
-        | Type[BaseModel]
-        | None = None,                                                                    # ← FLEXIBLE
+        response_model: list[Type[BaseModel]] | Type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> Any:
         return await create_batch_chat(
@@ -214,13 +254,12 @@ def XAIClient(
     base_url: str = "https://api.x.ai/v1",
     timeout: Optional[int] = 120,
     persistence_manager: "PersistenceManager" | None = None,
-    response_model: Any = None,                                                           # ← ACCEPTED AT FACTORY LEVEL
+    response_model: Any = None,
     **kwargs: Any,
 ) -> BaseXAIClient:
     """Factory function returning a specialised xAI client.
 
-    response_model is forwarded to the chosen client.
-    For batch mode it accepts either a single model or a list of models.
+    response_model is forwarded (single model or list for batch mode).
     """
     client_map: dict[ChatMode, Type[BaseXAIClient]] = {
         "turn": TurnXAIClient,
@@ -240,6 +279,12 @@ def XAIClient(
         base_url=base_url,
         timeout=timeout,
         persistence_manager=persistence_manager,
-        response_model=response_model,                                                    # ← FORWARDED
+        response_model=response_model,
         **kwargs,
     )
+
+
+# Auto-register with the central factory
+from .client_factory import register_provider
+
+register_provider("xai", TurnXAIClient, StreamXAIClient, BatchXAIClient)
