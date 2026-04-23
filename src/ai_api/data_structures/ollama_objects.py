@@ -25,7 +25,13 @@ from typing import Any, Literal, Protocol, Sequence, Type, TypeVar, cast
 from pydantic import BaseModel, ConfigDict, Field
 
 # Import the new generic protocols
-from .base_objects import LLMEndpoint, LLMRequestProtocol, LLMResponseProtocol
+from .base_objects import (
+    LLMEndpoint,
+    LLMRequestProtocol,
+    LLMResponseProtocol,
+    LLMStreamingChunkProtocol,
+    SaveMode,
+)
 
 T = TypeVar("T", bound="OllamaJSONResponseSpec")
 
@@ -43,8 +49,6 @@ __all__: list[str] = [
     "LLMResponseProtocol",                                                                # re-exported
 ]
 
-# Re-export the shared protocol and type so existing code imports from here unchanged
-from .xai_objects import LLMStreamingChunkProtocol, SaveMode                              # type: ignore
 
 type OllamaRole = Literal["system", "user", "assistant", "tool"]
 
@@ -75,6 +79,9 @@ class OllamaJSONResponseSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     def to_ollama_format(self) -> dict[str, Any] | str | None:
+        """
+        Convert to the format expected by Ollama's /api/chat endpoint.
+        """
         if self.model is None:
             return None
         if isinstance(self.model, dict):

@@ -1,22 +1,14 @@
-"""High-level asynchronous client for Ollama (local) using native API.
+"""
+ollama_client.py — fully updated with unified `response_model` support.
 
-Mirrors the exact public API and behaviour of xai_client.py so you can
-swap providers with minimal code changes:
-
-    client = OllamaClient(logger=logger, host="http://localhost:11434", ...)
-    response = await client.create_chat(messages=..., model="llama3.2", ...)
-
-Fully supports:
-- Turn-based (non-streaming)
-- Streaming (with real-time persistence)
-- Structured JSON output via OllamaJSONResponseSpec
-- Multimodal (base64 images in messages)
-- Since Batching is not a functionality provided by Ollama, it is not implemented here.
-- Your existing xAIPersistenceManager (reused unchanged)
-- Same SaveMode, logging pattern, and error wrapping style
+Now supports structured output (Pydantic models) consistently across:
+- Turn mode
+- Stream mode
+- Batch mode (single model or per-request list of models)
 """
 
-import json
+from __future__ import annotations
+
 import logging
 from collections.abc import AsyncIterator
 from typing import Any, Literal, Optional, Type
@@ -35,7 +27,6 @@ from ..data_structures.ollama_objects import (
     OllamaStreamingChunk,
     SaveMode,
 )
-from .client_factory import get_llm_client, register_provider
 from .common.persistence import PersistenceManager
 from .ollama.chat_stream_ollama import generate_stream_and_persist
 from .ollama.chat_turn_ollama import create_turn_chat_session
@@ -51,7 +42,7 @@ class BaseOllamaClient:
         self,
         logger: logging.Logger,
         host: str = "http://localhost:11434",
-        timeout: Optional[int] = 180,                                                     # Ollama can be slower on large models
+        timeout: Optional[int] = 180,
         persistence_manager: "PersistenceManager | None" = None,
         **kwargs: Any,
     ) -> None:
@@ -71,7 +62,6 @@ class BaseOllamaClient:
         return self._http_client
 
     async def aclose(self) -> None:
-        """Close the underlying HTTP client."""
         if self._http_client is not None:
             await self._http_client.aclose()
             self._http_client = None
@@ -86,7 +76,7 @@ class TurnOllamaClient(BaseOllamaClient):
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         save_mode: SaveMode = "none",
-        response_model: type["BaseModel"] | None = None,
+        response_model: Type[BaseModel] | None = None,                                    # ← NEW
         **kwargs: Any,
     ) -> OllamaResponse:
         return await create_turn_chat_session(
@@ -96,14 +86,12 @@ class TurnOllamaClient(BaseOllamaClient):
             temperature=temperature,
             max_tokens=max_tokens,
             save_mode=save_mode,
-            response_model=response_model,
+            response_model=response_model,                                                # ← PASS THROUGH
             **kwargs,
         )
 
 
 class StreamOllamaClient(BaseOllamaClient):
-    """Streaming client for Ollama (now thin and fully delegated)."""
-
     async def create_chat(
         self,
         messages: list[dict],
@@ -112,9 +100,9 @@ class StreamOllamaClient(BaseOllamaClient):
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         save_mode: SaveMode = "none",
+        response_model: Type[BaseModel] | None = None,                                    # ← NEW
         **kwargs: Any,
     ) -> AsyncIterator[LLMStreamingChunkProtocol]:
-        """Streaming Ollama chat – delegates persistence + streaming to generate_stream_and_persist."""
         self.logger.info(
             "Starting Ollama streaming chat",
             extra={"model": model, "save_mode": save_mode},
@@ -138,38 +126,56 @@ class StreamOllamaClient(BaseOllamaClient):
             http_client,
             request,
             save_mode=save_mode,
+            response_model=response_model,                                                # ← PASS THROUGH
         ):
             yield chunk
 
 
 class BatchOllamaClient(BaseOllamaClient):
-    """Batch support for Ollama (simulated – runs requests sequentially, as Ollama has no native batch API)."""
+    """Batch support for Ollama (simulated – now supports flexible response_model)."""
 
     async def create_chat(
         self,
-        messages: list[dict],
+        messages: list[list[dict]],
         model: str,
         *,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        save_mode: SaveMode = "none",
+        response_model: list[Type[BaseModel]]
+        | Type[BaseModel]
+        | None = None,                                                                    # ← FLEXIBLE
         **kwargs: Any,
-    ) -> OllamaResponse:
-        """Simulated batch (single request for now – extendable to true parallel later)."""
+    ) -> list[OllamaResponse]:
+        """Simulated batch with per-request or shared structured output."""
         self.logger.info("Ollama batch chat (simulated)", extra={"model": model})
-        # For local Ollama we just delegate to turn mode
-        turn_client = TurnOllamaClient(
-            logger=self.logger,
-            host=self.host,
-            timeout=self.timeout,
-            persistence_manager=self.persistence_manager,
-        )
-        return await turn_client.create_chat(
-            messages=messages,
-            model=model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            **kwargs,
-        )
+
+        results = []
+        for idx, msgs in enumerate(messages):
+            # Determine response_model for this specific request
+            if isinstance(response_model, list):
+                current_rm = response_model[idx]
+            else:
+                current_rm = response_model
+
+            turn_client = TurnOllamaClient(
+                logger=self.logger,
+                host=self.host,
+                timeout=self.timeout,
+                persistence_manager=self.persistence_manager,
+            )
+            result = await turn_client.create_chat(
+                messages=msgs,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                save_mode=save_mode,
+                response_model=current_rm,
+                **kwargs,
+            )
+            results.append(result)
+
+        return results
 
 
 def OllamaClient(
@@ -181,11 +187,21 @@ def OllamaClient(
     persistence_manager: "PersistenceManager | None" = None,
     **kwargs: Any,
 ) -> BaseOllamaClient:
-    """Factory – delegates to the central registry (see client_factory.py)."""
-    return get_llm_client(
-        "ollama",
+    """Factory – now fully supports response_model across all modes."""
+    client_map: dict[ChatMode, Type[BaseOllamaClient]] = {
+        "turn": TurnOllamaClient,
+        "stream": StreamOllamaClient,
+        "batch": BatchOllamaClient,
+    }
+
+    ClientClass = client_map.get(mode)
+    if ClientClass is None:
+        raise ValueError(
+            f"Unsupported mode '{mode}'. Must be one of: {list(client_map.keys())}"
+        )
+
+    return ClientClass(
         logger=logger,
-        mode=mode,
         host=host,
         timeout=timeout,
         persistence_manager=persistence_manager,
@@ -194,13 +210,10 @@ def OllamaClient(
 
 
 class EmbedOllamaClient(BaseOllamaClient):
-    """Embeddings-only client (inherits everything from BaseOllamaClient)."""
-
     async def create_embeddings(self, *args, **kwargs) -> "OllamaEmbedResponse":
         from .ollama.embeddings_ollama import EmbedOllamaClient as EmbedImpl
         from .ollama.embeddings_ollama import create_embeddings
 
-        # Delegate to the dedicated implementation to satisfy strict typing
         impl = EmbedImpl(
             logger=self.logger,
             host=self.host,
@@ -208,8 +221,3 @@ class EmbedOllamaClient(BaseOllamaClient):
             persistence_manager=self.persistence_manager,
         )
         return await create_embeddings(impl, *args, **kwargs)
-
-    # Register this provider with the central factory
-
-
-register_provider("ollama", TurnOllamaClient, StreamOllamaClient, BatchOllamaClient)

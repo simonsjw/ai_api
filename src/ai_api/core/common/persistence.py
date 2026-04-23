@@ -28,7 +28,8 @@ from ai_api.data_structures.base_objects import (
     LLMRequestProtocol,
     LLMResponseProtocol,
 )
-from ai_api.data_structures.ollama_objects import SaveMode
+
+from ...data_structures.base_objects import SaveMode
 
 
 class PersistenceManager:

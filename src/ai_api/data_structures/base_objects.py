@@ -1,17 +1,13 @@
 """
-Generic LLM Request and Response Protocols for the ai_api package.
+Generic LLM Request, Response, and Streaming Chunk Protocols + SaveMode.
 
 These protocols define a minimal, provider-agnostic interface that every
-request and response object (xAI, Ollama, embeddings, future providers)
-must implement. This allows persistence.py, logging, and other cross-cutting
-concerns to work with plain dictionaries and never need to know the concrete
-class types.
+request, response, and streaming chunk object must implement.
 
 Design goals:
-- Zero knowledge of xAI vs Ollama in persistence layer
-- Consistent `meta()`, `payload()`, `endpoint()` API across all providers
-- All methods return vanilla Python dicts for maximum decoupling
-- Easy to add new providers (just implement the three methods)
+- Zero knowledge of xAI vs Ollama (or future providers) in persistence, logging, etc.
+- Consistent API across all providers
+- Easy to add new providers (just implement the three methods/properties)
 """
 
 from __future__ import annotations
@@ -20,102 +16,80 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
 
+# ----------------------------------------------------------------------
+# SaveMode - now centralised here (moved from xai_objects.py)
+# ----------------------------------------------------------------------
+type SaveMode = Literal["none", "json_files", "postgres"]
+
+
+# ----------------------------------------------------------------------
+# LLMRequestProtocol
+# ----------------------------------------------------------------------
 @runtime_checkable
 class LLMRequestProtocol(Protocol):
-    """Minimal contract every request object must satisfy.
-
-    Implementations:
-        - xAIRequest
-        - OllamaRequest
-        - OllamaEmbedRequest (and future embedding requests)
-        - Any new provider request
-    """
+    """Minimal contract every request object must satisfy."""
 
     def meta(self) -> dict[str, Any]:
-        """Return generation settings that drove the response.
-
-        Typical keys: temperature, max_tokens, response_format, tools,
-        keep_alive, truncate, dimensions, save_mode, etc.
-        """
+        """Return generation settings (temperature, max_tokens, save_mode, etc.)."""
         ...
 
     def payload(self) -> dict[str, Any]:
-        """Return the actual prompt / messages / input being sent to the model.
-
-        For chat:   {"messages": [...], "input_type": "chat"}
-        For raw:    {"prompt": "...", "input_type": "raw"}
-        For embed:  {"input": ["text1", "text2"], "input_type": "embeddings"}
-        """
+        """Return the actual prompt / messages / input."""
         ...
 
     def endpoint(self) -> "LLMEndpoint":
-        """Return provider + model + connection information.
-
-        Example:  TODO - UPDATE TO SHOW LLMEndpoint.
-            {
-                "provider": "ollama" | "xai",
-                "model": "llama3.2" | "grok-4",
-                "base_url": "http://localhost:11434" | "https://api.x.ai/v1",
-                "path": "/api/chat" | "/chat/completions",
-                "api_type": "native" | "sdk"
-            }
-        """
+        """Return provider + model + connection information."""
         ...
 
 
+# ----------------------------------------------------------------------
+# LLMResponseProtocol
+# ----------------------------------------------------------------------
 @runtime_checkable
 class LLMResponseProtocol(Protocol):
-    """Minimal contract every response object must satisfy.
-
-    Implementations:
-        - xAIResponse
-        - OllamaResponse
-        - OllamaEmbedResponse (and future embedding responses)
-        - Any new provider response
-    """
+    """Minimal contract every response object must satisfy."""
 
     def meta(self) -> dict[str, Any]:
-        """Return generation settings that were actually used (echoed back)."""
+        """Return generation settings that were actually used."""
         ...
 
     def payload(self) -> dict[str, Any]:
-        """Return the generated output.
-
-        For chat:   {"text": "...", "tool_calls": [...], "finish_reason": "..."}
-        For embed:  {"embeddings": [[...], [...]], "n_inputs": 2, "embedding_dim": 768}
-        """
+        """Return the generated output (text, tool_calls, parsed, etc.)."""
         ...
 
     def endpoint(self) -> "LLMEndpoint":
-        """Return provider + model + connection information (same shape as request).
-
-        Recommended: return an LLMEndpoint instance for richer typing and validation.
-        """
+        """Return provider + model + connection information."""
         ...
 
-        # ----------------------------------------------------------------------
-        # LLMEndpoint - rich, typed endpoint descriptor
-        # ----------------------------------------------------------------------
+
+# ----------------------------------------------------------------------
+# LLMStreamingChunkProtocol - now centralised here (moved from xai_objects.py)
+# ----------------------------------------------------------------------
+@runtime_checkable
+class LLMStreamingChunkProtocol(Protocol):
+    """Common contract for streaming chunks across all providers.
+
+    Uses properties for simplicity (streaming chunks are lightweight).
+    """
+
+    @property
+    def text(self) -> str: ...
+    @property
+    def finish_reason(self) -> str | None: ...
+    @property
+    def tool_calls_delta(self) -> list[dict[str, Any]] | None: ...
+    @property
+    def is_final(self) -> bool: ...
+    @property
+    def raw(self) -> dict[str, Any]: ...
 
 
+# ----------------------------------------------------------------------
+# LLMEndpoint
+# ----------------------------------------------------------------------
 @dataclass(frozen=True)
 class LLMEndpoint:
-    """Structured, validated representation of an LLM endpoint.
-
-    Use this in `endpoint()` methods for better type safety and richer metadata
-    than a plain dict. All fields are optional except provider + model.
-
-    Example usage in a request class:
-        def endpoint(self) -> LLMEndpoint:
-            return LLMEndpoint(
-                provider="ollama",
-                model=self.model,
-                base_url="http://localhost:11434",
-                path="/api/chat",
-                api_type="native",
-                extra={"timeout": 180}
-            )
-    """
+    """Structured, validated representation of an LLM endpoint."""
 
     provider: Literal["ollama", "xai", "groq", "anthropic", "openai", "vllm", "other"]
     model: str
@@ -125,11 +99,7 @@ class LLMEndpoint:
     extra: Any = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to plain dict (useful for persistence / logging)."""
-        d = {
-            "provider": self.provider,
-            "model": self.model,
-        }
+        d = {"provider": self.provider, "model": self.model}
         if self.base_url:
             d["base_url"] = self.base_url
         if self.path:

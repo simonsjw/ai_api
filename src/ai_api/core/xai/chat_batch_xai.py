@@ -1,62 +1,87 @@
 """
-Example of updated chat_batch_xai.py using the new symmetrical persistence pattern.
+chat_batch_xai.py — supports flexible structured output for batches.
+
+response_model can be:
+- None                    → normal unstructured batch
+- Single Type[BaseModel]  → same model for every request
+- list[Type[BaseModel]]   → different model per request (length must match batch size)
 """
 
 from __future__ import annotations
 
-import logging
-from typing import Any
+from typing import Any, Type
 
-from ...data_structures.xai_objects import xAIBatchRequest, xAIBatchResponse
-from ..common.persistence import PersistenceManager, persist_batch_requests
+from pydantic import BaseModel
+
+from ...data_structures.xai_objects import xAIRequest
+from ..common.response_struct import create_json_response_spec
 
 
 async def create_batch_chat(
     client: Any,
     messages_list: list[list[dict]],
-    model: str = "grok-4",
+    model: str,
     *,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    save_mode: str = "none",
+    response_model: list[Type[BaseModel]] | Type[BaseModel] | None = None,
     **kwargs: Any,
-) -> xAIBatchResponse:
-    """Batch chat with new symmetrical persistence pattern."""
-
+) -> list[Any]:
+    """
+    Batch processing with optional per-request or shared structured output.
+    """
     logger = client.logger
-    logger.info("Creating xAI batch chat", extra={"batch_size": len(messages_list)})
+    logger.info("Starting xAI batch chat", extra={"batch_size": len(messages_list)})
 
-    # Build batch request
-    requests = [
-        client._build_request(messages, model, temperature, max_tokens, **kwargs)
-        for messages in messages_list
-    ]
-    batch_request = xAIBatchRequest(requests=requests)
-
-    # Persist all requests (new helper)
-    if client.persistence_manager is not None:
-        try:
-            await persist_batch_requests(client.persistence_manager, requests)
-        except Exception as exc:
-            logger.warning(
-                "Batch request persistence failed (continuing)",
-                extra={"error": str(exc)},
+    # === VALIDATION: if list, must match batch size ===
+    if isinstance(response_model, list):
+        if len(response_model) != len(messages_list):
+            raise ValueError(
+                f"response_model list length ({len(response_model)}) "
+                f"must equal number of batch requests ({len(messages_list)})"
             )
 
-            # Call the actual batch API (simplified)
-    raw_results = await client._call_batch_api(batch_request)
+    results = []
 
-    batch_response = xAIBatchResponse.from_dict(raw_results)
+    for idx, messages in enumerate(messages_list):
+        # Pick the right response_model for this specific request
+        if isinstance(response_model, list):
+            current_rm = response_model[idx]
+        else:
+            current_rm = response_model                                                   # None or single shared model
 
-    # Persist the batch response
-    if client.persistence_manager is not None:
-        try:
-            await client.persistence_manager.persist_response(
-                batch_response, request=batch_request
+            # Build request
+        request = xAIRequest(
+            model=model,
+            input=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            save_mode=save_mode,
+            **kwargs,
+        )
+
+        # Apply structured output spec if needed
+        if current_rm is not None:
+            spec = create_json_response_spec("xai", current_rm)
+            request = request.model_copy(
+                update={"response_format": spec.to_sdk_response_format()}
             )
-        except Exception as exc:
-            logger.warning(
-                "Batch response persistence failed (continuing)",
-                extra={"error": str(exc)},
-            )
 
-    return batch_response
+            # Reuse the turn-based logic (keeps code DRY)
+        from .chat_turn_xai import create_turn_chat_session
+
+        result = await create_turn_chat_session(
+            client,
+            client._sdk_client,
+            messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            save_mode=save_mode,
+            response_model=current_rm,
+            **kwargs,
+        )
+        results.append(result)
+
+    return results

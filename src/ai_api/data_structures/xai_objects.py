@@ -55,8 +55,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from xai_sdk import AsyncClient as XAIAsyncClient
 from xai_sdk.chat import assistant, system, user
 
-# Import the new generic protocols
-from .base_objects import LLMEndpoint, LLMRequestProtocol, LLMResponseProtocol
+from .base_objects import (
+    LLMEndpoint,
+    LLMRequestProtocol,
+    LLMResponseProtocol,
+    LLMStreamingChunkProtocol,
+    SaveMode,
+)
 
 T = TypeVar("T", bound="xAIJSONResponseSpec")
 
@@ -77,7 +82,7 @@ __all__: list[str] = [
     "LLMResponseProtocol",                                                                # re-exported
 ]
 
-type SaveMode = Literal["none", "json_files", "postgres"]
+
 type Role = Literal["system", "user", "assistant", "developer"]
 
 # Required system-prompt substring that xAI expects when JSON mode is active.
@@ -85,24 +90,9 @@ type Role = Literal["system", "user", "assistant", "developer"]
 JSON_INSTRUCTION: str = "Extract the requested information as structured JSON."
 
 
-@runtime_checkable
-class LLMStreamingChunkProtocol(Protocol):
-    """Common contract for streaming chunks across providers."""
-
-    @property
-    def text(self) -> str: ...
-    @property
-    def finish_reason(self) -> str | None: ...
-    @property
-    def tool_calls_delta(self) -> list[dict[str, Any]] | None: ...
-    @property
-    def is_final(self) -> bool: ...
-    @property
-    def raw(self) -> dict[str, Any]: ...
-
-    # ----------------------------------------------------------------------
-    # Structured Output
-    # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Structured Output
+# ----------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -120,9 +110,12 @@ class xAIJSONResponseSpec(BaseModel):
     model : type[BaseModel] | dict[str, Any] | None
         Pydantic model class or raw JSON schema. ``None`` disables structured
         output.
+    instruction: str | None
+        An optional custom system instruction to produce JSON formatted responses.
     """
 
     model: type[BaseModel] | dict[str, Any] | None = None
+    instruction: str | None = None                                                        # optional custom system instruction
 
     model_config = ConfigDict(
         extra="forbid",
@@ -130,16 +123,18 @@ class xAIJSONResponseSpec(BaseModel):
     )
 
     def to_sdk_response_format(self) -> dict[str, Any] | None:
-        """Convert to the exact format expected by the xAI Responses API / OpenAI-compatible endpoint."""
+        """
+        Convert to the format expected by the xAI SDK.
+        """
         if self.model is None:
             return None
 
         if isinstance(self.model, dict):
             schema = self.model
-            name = "structured_output"
+            name = "response"
         else:
             schema = self.model.model_json_schema()
-            name = getattr(self.model, "__name__", "structured_output")
+            name = getattr(self.model, "__name__", "response")
 
         return {
             "type": "json_schema",
