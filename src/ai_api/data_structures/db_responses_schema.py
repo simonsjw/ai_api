@@ -44,7 +44,7 @@ Typical usage (inside the package, not user code):
 ...     meta={"temperature": 0.7},
 ...     tree_id=some_tree,
 ...     branch_id=some_branch,
-...     sequence=0
+...     sequence=0,
 ... )
 >>> # Responses are linked via the composite FK and can point to a parent
 >>> resp_row = Responses(
@@ -54,26 +54,11 @@ Typical usage (inside the package, not user code):
 ...     response={"text": "Hello world"},
 ...     meta={"eval_count": 42},
 ...     parent_response_id=previous_resp_id,  # enables branching
-...     sequence=1
+...     sequence=1,
 ... )
 
 See the ``main()`` function at the bottom for the one-time DB bootstrap
 that creates the partitioned tables and required extensions.
-"""
-
-#!/usr/bin/env python3
-"""
-Database schema for ai_api persistence – with Git-style conversation branching (refined April 2026).
-
-Key refinements:
-- Added lightweight Conversations table for tree-level metadata.
-- Extended Requests and Responses with tree_id, branch_id, parent_response_id, sequence.
-- Removed redundant conversation_id (tree_id is sufficient and cleaner).
-- Preserved original composite FK (request_id + request_tstamp) unchanged.
-- Added proper self-referential FK, unique constraint on (branch_id, sequence), and indexes.
-- All new fields are nullable for safe migration of existing data.
-
-This design enables arbitrary branching (like Git) with zero content duplication.
 """
 
 import asyncio
@@ -343,11 +328,10 @@ class Logs(Base):
         {"postgresql_partition_by": "RANGE (tstamp)", "extend_existing": True},
     )
 
-    # ─────────────────────────────────────────────────────────────────────────────
-    # NEW: Conversation Metadata (lightweight tree-level information)
-    # ─────────────────────────────────────────────────────────────────────────────
 
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Conversation Metadata (lightweight tree-level information)
+# ─────────────────────────────────────────────────────────────────────────────
 class Conversations(Base):
     """
     High-level metadata for each chat *tree*.

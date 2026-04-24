@@ -111,7 +111,7 @@ async def create_turn_chat_session(
             update={"response_format": spec.to_sdk_response_format()}
         )
 
-        # 3. Persist request (protocol style)
+    # 3. Persist request (protocol style)
     request_id = request_tstamp = None
     if save_mode != "none" and client.persistence_manager is not None:
         try:
@@ -124,8 +124,8 @@ async def create_turn_chat_session(
                 "Request persistence failed (continuing)", extra={"error": str(exc)}
             )
 
-            # 4. Call the actual LLM
-            # (simplified - in real code this would use the xAI SDK)
+    # 4. Call the actual LLM
+    # (simplified - in real code this would use the xAI SDK)
     chat = sdk_client.chat.create(
         model=request.model,
         **request.to_sdk_chat_kwargs(),
@@ -143,7 +143,7 @@ async def create_turn_chat_session(
                 "Failed to parse structured response", extra={"error": str(exc)}
             )
 
-            # 6. Persist response (NEW symmetrical protocol style)
+    # 6. Persist response (NEW symmetrical protocol style)
     if save_mode != "none" and client.persistence_manager is not None:
         try:
             await client.persistence_manager.persist_response(response, request=request)

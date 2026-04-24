@@ -32,7 +32,10 @@ Examples
 **1. Creating a request object that can be sent to an Ollama LLM**
 
 >>> from src.ai_api.data_structures.ollama_objects import (
-...     OllamaRequest, OllamaInput, OllamaMessage, OllamaJSONResponseSpec
+...     OllamaRequest,
+...     OllamaInput,
+...     OllamaMessage,
+...     OllamaJSONResponseSpec,
 ... )
 >>> # Simple text
 >>> req = OllamaRequest(model="llama3.2", input="Tell me a joke")
@@ -65,7 +68,7 @@ True
 ...     "message": {"role": "assistant", "content": "Why did the chicken..."},
 ...     "done": True,
 ...     "done_reason": "stop",
-...     "total_duration": 1_234_567_890,   # nanoseconds
+...     "total_duration": 1_234_567_890,  # nanoseconds
 ...     "prompt_eval_count": 12,
 ...     "eval_count": 87,
 ...     "eval_duration": 987_654_321,
@@ -73,7 +76,7 @@ True
 >>> resp = parse_ollama_response(raw)
 >>> print(resp.text)
 'Why did the chicken...'
->>> print(resp.meta()["total_duration"])          # raw ns for monitoring
+>>> print(resp.meta()["total_duration"])  # raw ns for monitoring
 1234567890
 >>> print(resp.payload()["telemetry"]["eval_count"])  # 87 tokens generated
 
@@ -85,7 +88,7 @@ that Ollama returns from ``/api/chat``. These allow real-time dashboards:
 >>> tokens_per_sec = resp.eval_count / (resp.eval_duration / 1_000_000_000)
 >>> print(f"Generation speed: {tokens_per_sec:.1f} tok/s")
 >>> load_time_ms = (resp.load_duration or 0) / 1_000_000
->>> print(f"Model load time: {load_time_ms:.0f} ms")   # indicates cold-start vs warm
+>>> print(f"Model load time: {load_time_ms:.0f} ms")  # indicates cold-start vs warm
 >>> # prompt_eval_count vs eval_count shows prefill vs decode cost
 >>> # (useful for optimising context length / batch size on GPU)
 
@@ -140,11 +143,10 @@ class DoneReason(str, Enum):
     LENGTH = "length"
     ERROR = "error"
 
-    # ----------------------------------------------------------------------
-    # Structured Output (Ollama style)
-    # ----------------------------------------------------------------------
 
-
+# ----------------------------------------------------------------------
+# Structured Output (Ollama style)
+# ----------------------------------------------------------------------
 class OllamaJSONResponseSpec(BaseModel):
     """Specification for structured (JSON) responses.
 
@@ -196,11 +198,10 @@ class OllamaJSONResponseSpec(BaseModel):
         text = response.text if isinstance(response, OllamaResponse) else response
         return cls.parse_json(text)
 
-    # ----------------------------------------------------------------------
-    # Message & Input
-    # ----------------------------------------------------------------------
 
-
+# ----------------------------------------------------------------------
+# Message & Input
+# ----------------------------------------------------------------------
 @dataclass(frozen=True)
 class OllamaMessage:
     """Ollama message (identical public API to xAIMessage).
@@ -277,11 +278,10 @@ class OllamaInput:
             )
         return cls(messages=tuple(processed))
 
-    # ----------------------------------------------------------------------
-    # Main Request (implements LLMRequestProtocol)
-    # ----------------------------------------------------------------------
 
-
+# ----------------------------------------------------------------------
+# Main Request (implements LLMRequestProtocol)
+# ----------------------------------------------------------------------
 @dataclass(frozen=True)
 class OllamaRequest(BaseModel, LLMRequestProtocol):
     """Ollama-native request (implements LLMRequestProtocol).
@@ -534,11 +534,10 @@ class OllamaRequest(BaseModel, LLMRequestProtocol):
             data["input"] = OllamaInput.from_list(data["input"])
         return cls(**data)
 
-    # ----------------------------------------------------------------------
-    # Response (implements LLMResponseProtocol)
-    # ----------------------------------------------------------------------
 
-
+# ----------------------------------------------------------------------
+# Response (implements LLMResponseProtocol)
+# ----------------------------------------------------------------------
 @dataclass(frozen=True)
 class OllamaResponse(BaseModel, LLMRequestProtocol):
     """Ollama-native response (implements LLMResponseProtocol).
@@ -670,11 +669,10 @@ class OllamaResponse(BaseModel, LLMRequestProtocol):
         txt = self.text
         return txt[:max_chars] + "…" if len(txt) > max_chars else txt
 
-    # ----------------------------------------------------------------------
-    # Streaming Chunk (implements LLMStreamingChunkProtocol)
-    # ----------------------------------------------------------------------
 
-
+# ----------------------------------------------------------------------
+# Streaming Chunk (implements LLMStreamingChunkProtocol)
+# ----------------------------------------------------------------------
 @dataclass(frozen=True)
 class OllamaStreamingChunk:
     """Implements LLMStreamingChunkProtocol — drop-in compatible with xAI streaming code.

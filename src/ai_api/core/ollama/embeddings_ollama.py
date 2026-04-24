@@ -64,8 +64,6 @@ __all__ = [
 # ----------------------------------------------------------------------
 # Self-contained Request model (implements LLMRequestProtocol)
 # ----------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class OllamaEmbedRequest(BaseModel):
     """Request model for Ollama embeddings.
@@ -140,8 +138,6 @@ class OllamaEmbedRequest(BaseModel):
 # ----------------------------------------------------------------------
 # Self-contained Response model (implements LLMResponseProtocol)
 # ----------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class OllamaEmbedResponse(BaseModel):
     """Response model for Ollama embeddings.
@@ -230,8 +226,6 @@ class OllamaEmbedResponse(BaseModel):
 # ----------------------------------------------------------------------
 # Core embedding logic
 # ----------------------------------------------------------------------
-
-
 async def create_embeddings(
     client: "EmbedOllamaClient",
     model: str,

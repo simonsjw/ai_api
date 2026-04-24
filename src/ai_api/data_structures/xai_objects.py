@@ -32,7 +32,10 @@ Examples
 **Creating a request object that can be sent to xAI**
 
 >>> from src.ai_api.data_structures.xai_objects import (
-...     xAIRequest, xAIInput, xAIMessage, xAIJSONResponseSpec
+...     xAIRequest,
+...     xAIInput,
+...     xAIMessage,
+...     xAIJSONResponseSpec,
 ... )
 >>> from pydantic import BaseModel
 
@@ -46,7 +49,7 @@ Examples
 ...     input="Tell me about Paris",
 ...     response_format=spec,
 ...     temperature=0.3,
-...     max_tokens=200
+...     max_tokens=200,
 ... )
 >>> kwargs = req.to_sdk_chat_kwargs()
 >>> print(kwargs["response_format"]["type"])
@@ -69,12 +72,12 @@ True
 >>> raw = {
 ...     "model": "grok-2-latest",
 ...     "choices": [{"message": {"content": '{"name": "Paris", "population": 2100000}'}}],
-...     "usage": {"prompt_tokens": 42, "completion_tokens": 18}
+...     "usage": {"prompt_tokens": 42, "completion_tokens": 18},
 ... }
 >>> resp = xAIResponse.from_dict(raw)
 >>> print(resp.text)
 '{"name": "Paris", "population": 2100000}'
->>> parsed = City.model_validate_json(resp.text)   # or use the post-processor
+>>> parsed = City.model_validate_json(resp.text)  # or use the post-processor
 >>> resp.set_parsed(parsed)
 >>> print(resp.payload()["parsed"].name)
 'Paris'
@@ -148,8 +151,6 @@ JSON_INSTRUCTION: str = "Extract the requested information as structured JSON."
 # ----------------------------------------------------------------------
 # Structured Output
 # ----------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class xAIJSONResponseSpec(BaseModel):
     """Specification for enforcing JSON-structured responses.
@@ -229,11 +230,10 @@ class xAIJSONResponseSpec(BaseModel):
             json_data = response.text
         return cls.parse_json(json_data)
 
-    # ----------------------------------------------------------------------
-    # Message & Input
-    # ----------------------------------------------------------------------
 
-
+# ----------------------------------------------------------------------
+# Message & Input
+# ----------------------------------------------------------------------
 @dataclass(frozen=True)
 class xAIMessage:
     """Immutable message supporting text, images, and file attachments.
@@ -247,10 +247,13 @@ class xAIMessage:
 
     Examples
     --------
-    >>> msg = xAIMessage(role="user", content=[
-    ...     {"type": "input_text", "text": "Describe"},
-    ...     {"type": "input_image", "image_url": "https://..."}
-    ... ])
+    >>> msg = xAIMessage(
+    ...     role="user",
+    ...     content=[
+    ...         {"type": "input_text", "text": "Describe"},
+    ...         {"type": "input_image", "image_url": "https://..."},
+    ...     ],
+    ... )
     """
 
     role: Role
@@ -326,11 +329,10 @@ class xAIInput:
             )
         return cls(messages=tuple(processed))
 
-    # ----------------------------------------------------------------------
-    # Main Request (implements LLMRequestProtocol)
-    # ----------------------------------------------------------------------
 
-
+# ----------------------------------------------------------------------
+# Main Request (implements LLMRequestProtocol)
+# ----------------------------------------------------------------------
 @dataclass(frozen=True)
 class xAIRequest(BaseModel, LLMRequestProtocol):
     """xAI-native request (implements LLMRequestProtocol).
@@ -372,9 +374,6 @@ class xAIRequest(BaseModel, LLMRequestProtocol):
 
     model_config = ConfigDict(frozen=True)
 
-    # ------------------------------------------------------------------
-    # LLMRequestProtocol implementation
-    # ------------------------------------------------------------------
     def meta(self) -> dict[str, Any]:
         """Return generation settings (implements LLMRequestProtocol)."""
         return {
@@ -472,11 +471,10 @@ class xAIRequest(BaseModel, LLMRequestProtocol):
         """Required by chat_batch_xai.py."""
         return self.to_sdk_chat_kwargs()
 
-    # ----------------------------------------------------------------------
-    # Response (implements LLMResponseProtocol)
-    # ----------------------------------------------------------------------
 
-
+# ----------------------------------------------------------------------
+# Response (implements LLMResponseProtocol)
+# ----------------------------------------------------------------------
 @dataclass(frozen=True)
 class xAIResponse(BaseModel, LLMResponseProtocol):
     """xAI response wrapper (implements LLMResponseProtocol).
@@ -574,11 +572,10 @@ class xAIResponse(BaseModel, LLMResponseProtocol):
         """Required by response_struct_xai.py."""
         object.__setattr__(self, "parsed", parsed)                                        # since frozen dataclass
 
-        # ----------------------------------------------------------------------
-        # Batch Support
-        # ----------------------------------------------------------------------
 
-
+# ----------------------------------------------------------------------
+# Batch Support
+# ----------------------------------------------------------------------
 @dataclass(frozen=True)
 class xAIBatchRequest(BaseModel):
     requests: list[xAIRequest]
@@ -613,11 +610,10 @@ class xAIBatchResponse(BaseModel):
         responses = [xAIResponse.from_dict(r) for r in data.get("responses", [])]
         return cls(responses=responses, batch_id=data.get("batch_id"))
 
-    # ----------------------------------------------------------------------
-    # Streaming Chunk
-    # ----------------------------------------------------------------------
 
-
+# ----------------------------------------------------------------------
+# Streaming Chunk
+# ----------------------------------------------------------------------
 @dataclass(frozen=True)
 class xAIStreamingChunk:
     """Native streaming chunk (implements LLMStreamingChunkProtocol)."""

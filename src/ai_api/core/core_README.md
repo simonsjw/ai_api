@@ -135,15 +135,15 @@ async for chunk in client.create_chat(
 
 ## Provider Comparison
 
-| Feature                    | Ollama                              | xAI                                      |
-|---------------------------|-------------------------------------|------------------------------------------|
-| **Transport**             | Native HTTP (`httpx`)               | Official SDK (gRPC + HTTP)               |
-| **Batch**                 | Simulated (sequential/concurrent)   | **Native** + per-request `response_model` lists |
-| **Embeddings**            | First-class (`/api/embed`)          | Not yet implemented                      |
-| **Model Management**      | `pull_model()`, `show_model()`, `get_model_options()` | `list_models()`, `get_model_info()`     |
-| **Generation Params**     | Very rich (`num_ctx`, `repeat_penalty`, `think`, `mirostat`...) | Standard + thinking mode                 |
-| **Error Types**           | HTTP + GPU memory warning           | Rich (rate limit, auth, multimodal, cache, batch) |
-| **Local / Remote**        | Local (localhost:11434)             | Remote (api.x.ai)                        |
+| Feature               | Ollama                                                          | xAI                                               |
+|-----------------------|-----------------------------------------------------------------|---------------------------------------------------|
+| **Transport**         | Native HTTP (`httpx`)                                           | Official SDK (gRPC + HTTP)                        |
+| **Batch**             | Simulated (sequential/concurrent)                               | **Native** + per-request `response_model` lists   |
+| **Embeddings**        | First-class (`/api/embed`)                                      | Not yet implemented                               |
+| **Model Management**  | `pull_model()`, `show_model()`, `get_model_options()`           | `list_models()`, `get_model_info()`               |
+| **Generation Params** | Very rich (`num_ctx`, `repeat_penalty`, `think`, `mirostat`...) | Standard + thinking mode                          |
+| **Error Types**       | HTTP + GPU memory warning                                       | Rich (rate limit, auth, multimodal, cache, batch) |
+| **Local / Remote**    | Local (localhost:11434)                                         | Remote (api.x.ai)                                 |
 
 ## Adding a New Provider
 
@@ -170,4 +170,4 @@ All modules contain comprehensive NumPy-style docstrings with usage examples.
 
 ---
 
-**`ai_api.core`** gives you a production-ready, extensible, and beautifully consistent interface to any LLM — today and tomorrow.
+**`ai_api.core`** provides a production-ready, extensible and consistent interface to any LLM.
