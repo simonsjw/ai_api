@@ -158,5 +158,3 @@ Contributions are welcome! Please open an issue or pull request. Focus areas:
 ---
 
 **ai_api** — One clean interface. Any LLM. Built for real applications.
-
-*Made with care for developers who want power without the boilerplate.*
