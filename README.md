@@ -54,31 +54,31 @@ async for chunk in client.create_chat(
 ## 🏗️ Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      Your Application                        │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-                               ▼
-                    ┌──────────────────────┐
-                    │   core/client_factory │  ← Unified entry point
-                    │   get_llm_client()    │
-                    └──────────┬───────────┘
-                               │
-                ┌──────────────┼──────────────┐
-                ▼              ▼              ▼
-         ollama_client    xai_client     (future providers)
-                │              │
-                ▼              ▼
-         core/ollama/    core/xai/     ← Provider-specific logic
-                │              │
-                └──────┬───────┘
-                       ▼
-              ai_api.data_structures     ← Protocols & models
-              (LLMRequestProtocol, LLMResponseProtocol, etc.)
-                       │
-                       ▼
-              core/common/               ← Shared utilities
-              (PersistenceManager, errors, response_struct)
+    ┌─────────────────────────────────────────────────────────────┐
+    │                      Your Application                       │
+    └──────────────────────────────┬──────────────────────────────┘
+                                   │
+                                   ▼
+                        ┌──────────────────────┐
+                        │  core/client_factory │  ← Unified entry point
+                        │  get_llm_client()    │
+                        └──────────┬───────────┘
+                                   │
+                    ┌──────────────┼──────────────┐
+                    ▼              ▼              ▼
+             ollama_client    xai_client     (future providers)
+                    │              │
+                    ▼              ▼
+             core/ollama/    core/xai/     ← Provider-specific logic
+                    │              │
+                    └──────┬───────┘
+                           ▼
+                  ai_api.data_structures     ← Protocols & models
+                  (LLMRequestProtocol, LLMResponseProtocol, etc.)
+                           │
+                           ▼
+                  core/common/               ← Shared utilities
+                  (PersistenceManager, errors, response_struct)
 ```
 
 **Three clean layers:**
