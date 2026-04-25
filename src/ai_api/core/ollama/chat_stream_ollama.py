@@ -1,45 +1,43 @@
 """
-Ollama streaming chat implementation with symmetrical persistence.
+Ollama streaming chat implementation with final-response persistence.
 
-This module implements real-time token streaming for Ollama using the native
-``/api/chat?stream=true`` endpoint. It is the concrete implementation behind
-``StreamOllamaClient.create_chat(...)``.
+This module implements real-time token streaming from Ollama's
+``/api/chat`` endpoint while ensuring that the **complete** interaction is
+persisted exactly once via the unified ``persist_chat_turn`` method (the
+legacy ``persist_request`` / ``persist_response`` calls have been removed).
 
-High-level view of Ollama streaming
------------------------------------
-- Uses httpx streaming response (``async with http_client.stream(...)``).
-- Yields ``OllamaStreamingChunk`` objects in real time (text deltas, finish_reason, telemetry).
-- After the stream ends, assembles a final ``OllamaResponse`` and persists it
-  (the request was already persisted before streaming started).
-- Structured output (``response_model``) is supported: the final accumulated
-  text is validated against the Pydantic model and attached as ``.parsed``.
+Streaming chunks are yielded to the caller as ``OllamaStreamingChunk``
+objects (implementing ``LLMStreamingChunkProtocol``).  After the stream
+finishes, the accumulated final response is converted to an
+``OllamaResponse`` and persisted with ``kind="chat"`` (branching metadata
+passed through from the caller).
 
-Comparison with xAI streaming
------------------------------
-- Ollama: native HTTP streaming, fine-grained telemetry in every chunk
-  (total_duration, load_duration, etc.), local execution.
-- xAI: SDK-based async iterator, final response built from accumulated chunks,
-  richer error types (rate-limit, thinking mode), native batch support in a
-  separate module.
-
-The streaming path deliberately re-uses the same persistence and structured-output
-machinery as the turn-based path for consistency.
+Design notes
+------------
+- Only the *final* response is persisted.  Intermediate chunks are **not**
+  written to the database (they would create thousands of rows for long
+  generations).
+- If the stream is cancelled or errors, a best-effort attempt is still made
+  to persist whatever has been accumulated so far.
+- The same ``OllamaRequest`` object that was used to start the stream is
+  passed to ``persist_chat_turn`` so the exact prompt (including any
+  structured-output spec) is recorded in the neutral blob.
 
 See Also
 --------
-ai_api.core.ollama_client.StreamOllamaClient
-ai_api.core.ollama.chat_turn_ollama
-    The non-streaming counterpart (shares the same persistence pattern).
-ai_api.core.xai.chat_stream_xai
-    The xAI streaming implementation.
+chat_turn_ollama : non-streaming counterpart (identical persistence path).
+ollama_client.StreamOllamaClient : thin wrapper that yields the chunks
+    produced by this module.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, AsyncIterator, Type
+from collections.abc import AsyncIterator
+from typing import Any
 
-from pydantic import BaseModel
+import httpx
 
 from ...data_structures.ollama_objects import (
     OllamaRequest,
@@ -47,114 +45,155 @@ from ...data_structures.ollama_objects import (
     OllamaStreamingChunk,
 )
 from ..common.persistence import PersistenceManager
-from ..common.response_struct import create_json_response_spec
 
 
 async def generate_stream_and_persist(
     logger: logging.Logger,
     persistence_manager: PersistenceManager | None,
-    http_client: Any,
+    http_client: httpx.AsyncClient,
     request: OllamaRequest,
     save_mode: str = "none",
-    response_model: Type[BaseModel] | None = None,
+    **kwargs: Any,
 ) -> AsyncIterator[OllamaStreamingChunk]:
-    """Generate a streaming chat response from Ollama and persist the final result.
+    """Stream tokens from Ollama and persist the final response.
 
-    This generator yields chunks as they arrive from Ollama, then (after the
-    stream completes) builds and persists a final ``OllamaResponse`` object.
-    Structured output validation happens on the accumulated text before
-    persistence.
+    This coroutine is the streaming counterpart of ``create_turn_chat_session``.
+    It yields ``OllamaStreamingChunk`` objects in real time while
+    accumulating the full assistant message.  When the stream ends, the
+    accumulated data is turned into an ``OllamaResponse`` and persisted via
+    the single ``persist_chat_turn`` entry point.
 
     Parameters
     ----------
     logger : logging.Logger
-        Logger for info/warning messages.
+        Structured logger (passed from the client).
     persistence_manager : PersistenceManager or None
-        Used to persist the final response (if ``save_mode != "none"``).
+        If ``None`` or ``save_mode="none"`` no persistence occurs.
     http_client : httpx.AsyncClient
         Pre-configured client pointing at the Ollama host.
     request : OllamaRequest
-        The request object (already contains model, messages, generation params,
-        save_mode, and optionally response_format).
-    save_mode : {"none", "json_files", "postgres"}, optional
-        Persistence mode (default "none").
-    response_model : type[pydantic.BaseModel] or None, optional
-        If supplied, the final text is validated against this model and the
-        resulting instance is attached to the final response as ``.parsed``.
+        The fully constructed request (already contains ``save_mode``,
+        temperature, structured-output spec, etc.).
+    save_mode : {"none", "json_files", "postgres"}, default "none"
+        Passed through to ``persist_chat_turn``.
+    **kwargs
+        Additional branching parameters (``tree_id``, ``branch_id``,
+        ``parent_response_id``, ``sequence``) forwarded to
+        ``persist_chat_turn``.
 
     Yields
     ------
     OllamaStreamingChunk
-        Real-time chunks containing ``text``, ``finish_reason``, ``is_final``,
-        and raw telemetry.
+        One chunk per token (or tool-call delta).  The final chunk has
+        ``is_final=True`` and contains the complete ``finish_reason`` and
+        usage statistics.
 
-    Notes
-    -----
-    The request itself should be persisted by the caller (e.g.
-    ``StreamOllamaClient``) before calling this function. Only the final
-    response is persisted here.
+    Raises
+    ------
+    httpx.HTTPStatusError
+        Propagated from the streaming POST if Ollama returns an error.
+    Exception
+        Any persistence error is logged at WARNING but does not abort the
+        stream.
+
+    Examples
+    --------
+    Typical usage inside StreamOllamaClient
+    >>> async for chunk in generate_stream_and_persist(
+    ...     logger,
+    ...     pm,
+    ...     http_client,
+    ...     request,
+    ...     save_mode="postgres",
+    ...     tree_id=ctx["tree_id"],
+    ...     branch_id=ctx["branch_id"],
+    ... ):
+    ...     print(chunk.text, end="", flush=True)
     """
-
-    # 1. Create JSON response spec (note: in current code this incorrectly uses "xai";
-    #    it should be "ollama" — documented as-is per instruction to assume code correct).
-    if response_model is not None:
-        spec = create_json_response_spec("xai", response_model)
-        request = request.model_copy(
-            update={"response_format": spec.to_sdk_response_format()}
-        )
-
-    full_text: list[str] = []
-    final_response: OllamaResponse | None = None
-
     payload = request.to_ollama_dict()
     payload["stream"] = True
 
-    # 2. Collect streaming chunks.
-    async with http_client.stream("POST", "/api/chat", json=payload) as resp:
-        async for line in resp.aiter_lines():
-            if not line.strip():
-                continue
-            chunk_raw = __import__("json").loads(line)
+    accumulated: dict[str, Any] = {
+        "model": request.model,
+        "message": {"role": "assistant", "content": ""},
+        "done": False,
+    }
+    usage: dict[str, Any] = {}
 
-            is_final = chunk_raw.get("done", False)
-            text = (
-                chunk_raw.get("message", {}).get("content", "") if not is_final else ""
-            )
+    try:
+        async with http_client.stream("POST", "/api/chat", json=payload) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.strip():
+                    continue
+                chunk_data = json.loads(line)
 
-            chunk = OllamaStreamingChunk(
-                text=text,
-                finish_reason=chunk_raw.get("done_reason"),
-                is_final=is_final,
-                done_reason=chunk_raw.get("done_reason"),
-                total_duration=chunk_raw.get("total_duration"),
-                raw={"chunk": chunk_raw},
-            )
-            yield chunk
+                # Merge incremental content
+                if "message" in chunk_data and "content" in chunk_data["message"]:
+                    accumulated["message"]["content"] += chunk_data["message"][
+                        "content"
+                    ]
 
-            if chunk.text:
-                full_text.append(chunk.text)
-            if is_final:
-                final_response = OllamaResponse.from_dict(chunk_raw)
+                # Capture final metadata on the last chunk
+                if chunk_data.get("done"):
+                    accumulated.update(chunk_data)
+                    usage = {
+                        "total_duration": chunk_data.get("total_duration"),
+                        "load_duration": chunk_data.get("load_duration"),
+                        "prompt_eval_count": chunk_data.get("prompt_eval_count"),
+                        "eval_count": chunk_data.get("eval_count"),
+                    }
+                    break
 
-                # 3. validate with response specification if provided.
-    if response_model is not None and final_response is not None:
-        try:
-            parsed = response_model.model_validate_json("".join(full_text))
-            final_response.parsed = parsed
-        except Exception as exc:
-            logger.warning(
-                "Failed to parse final structured chunk", extra={"error": str(exc)}
-            )
+                # Yield incremental chunk
+                yield OllamaStreamingChunk.from_dict(chunk_data)
 
-            # 4. Persist the final response
-    if (
-        save_mode != "none"
-        and persistence_manager is not None
-        and final_response is not None
-    ):
-        try:
-            await persistence_manager.persist_response(final_response, request=request)
-        except Exception as exc:
-            logger.warning(
-                "Response persistence failed (continuing)", extra={"error": str(exc)}
-            )
+        # ------------------------------------------------------------------
+        # Build final response and persist via unified method
+        # ------------------------------------------------------------------
+        final_response = OllamaResponse.from_dict(accumulated)
+        final_response.usage = usage                                                      # attach telemetry
+
+        if save_mode != "none" and persistence_manager is not None:
+            try:
+                await persistence_manager.persist_chat_turn(
+                    provider_response=final_response,
+                    provider_request=request,
+                    kind="chat",
+                    branching=True,
+                    **kwargs,                                                             # tree/branch/parent/sequence
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Streaming final-response persistence failed",
+                    extra={"error": str(exc)},
+                )
+
+        # Emit one final synthetic chunk so callers know the stream ended
+        yield OllamaStreamingChunk(
+            text="",
+            finish_reason=accumulated.get("done_reason", "stop"),
+            tool_calls_delta=None,
+            is_final=True,
+            raw=accumulated,
+        )
+
+    except Exception:
+        # Best-effort persistence of whatever we have so far
+        if (
+            save_mode != "none"
+            and persistence_manager is not None
+            and accumulated.get("message", {}).get("content")
+        ):
+            try:
+                partial = OllamaResponse.from_dict(accumulated)
+                await persistence_manager.persist_chat_turn(
+                    provider_response=partial,
+                    provider_request=request,
+                    kind="chat",
+                    branching=True,
+                    **kwargs,
+                )
+            except Exception:
+                pass
+        raise

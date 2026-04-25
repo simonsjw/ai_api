@@ -102,17 +102,27 @@ base_objects : the protocols this module implements
 xai_objects : the mirrored implementation for the xAI backend
 """
 
+from __future__ import annotations
+
+import json
 import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
-from typing import Any, Literal, Protocol, Sequence, Type, TypeVar, cast
+from typing import Any, Literal, Optional, Protocol, Sequence, Type, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
 # Import the new generic protocols
-from .base_objects import LLMEndpoint, LLMRequestProtocol, LLMResponseProtocol
+from .base_objects import (
+    LLMEndpoint,
+    LLMRequestProtocol,
+    LLMResponseProtocol,
+    NeutralPrompt,
+    NeutralTurn,
+    SaveMode,
+)
 
 T = TypeVar("T", bound="OllamaJSONResponseSpec")
 
@@ -316,6 +326,9 @@ class OllamaRequest(BaseModel, LLMRequestProtocol):
     -------
     meta, payload, endpoint
         Implementations of ``LLMRequestProtocol``.
+    from_neutral_history
+        Reconstruct an OllamaRequest from a slice of neutral
+        history plus a new prompt.
     to_ollama_dict
         The exact dict that should be POSTed to ``/api/chat``.
     has_media, extract_prompt_snippet, with_updates, from_dict
@@ -359,13 +372,6 @@ class OllamaRequest(BaseModel, LLMRequestProtocol):
     )
 
     model_config = ConfigDict(frozen=True, extra="allow")
-
-    def __post_init__(self) -> None:
-        if self.response_format is not None:
-            self._validate_json_instruction_present()
-
-    def _validate_json_instruction_present(self) -> None:
-        pass                                                                              # Ollama does NOT require a magic string like xAI
 
     # ------------------------------------------------------------------
     # LLMRequestProtocol implementation
@@ -449,6 +455,102 @@ class OllamaRequest(BaseModel, LLMRequestProtocol):
 
     def with_updates(self, **updates: Any) -> "OllamaRequest":
         return replace(self, **updates)
+
+    @classmethod
+    def from_neutral_history(
+        cls,
+        neutral_history: list[dict] | list[NeutralTurn],
+        new_prompt: str | list[dict],
+        metadata: dict[str, Any],
+        **kwargs,
+    ) -> "OllamaRequest":
+        """
+        Reconstruct an OllamaRequest from a slice of neutral history plus a new prompt.
+
+        Used by the persistence layer (and by ``ChatSession``) to convert the
+        provider-agnostic history returned by ``reconstruct_neutral_branch``
+        back into the exact message list that Ollama expects.
+
+        Parameters
+        ----------
+        neutral_history : list of dict or NeutralTurn
+            The reconstructed conversation turns (already filtered to the
+            relevant branch/depth). Each item is either a plain dict or a
+            ``NeutralTurn`` instance.
+        new_prompt : str or list of dict
+            The user message that will be appended as the final turn.
+            Multimodal content is supported via the standard content-block list.
+        metadata : dict
+            Generation parameters and other request settings (temperature,
+            max_tokens, response_format, tools, save_mode, model, etc.).
+            Passed through to the ``OllamaRequest`` constructor.
+        **kwargs
+            Additional keyword arguments forwarded to the constructor
+            (e.g. ``host``, ``timeout``).
+
+        Returns
+        -------
+        OllamaRequest
+            Fully populated request object ready to be sent via the Ollama
+            client (or via ``to_ollama_dict``).
+
+        See Also
+        --------
+        NeutralTurn : the neutral representation this method consumes.
+        xAIRequest.from_neutral_history : the equivalent method for xAI.
+        """
+        messages: list[OllamaMessage] = []
+        for turn in neutral_history:
+            if isinstance(turn, dict):
+                turn = NeutralTurn(**turn)
+            if turn.role in ("system", "user", "assistant"):
+                messages.append(
+                    OllamaMessage(
+                        role=turn.role, content=turn.content, images=turn.images or []
+                    )
+                )
+
+        # Append the new user prompt
+        if isinstance(new_prompt, str):
+            messages.append(OllamaMessage(role="user", content=new_prompt))
+        else:
+            # multimodal support
+            user_msg = OllamaMessage(
+                role="user", content=new_prompt[0].get("content") if new_prompt else ""
+            )
+            if isinstance(new_prompt, list) and len(new_prompt) > 1:
+                user_msg.images = [
+                    item.get("image")
+                    for item in new_prompt
+                    if item.get("type") == "image"
+                ]
+            messages.append(user_msg)
+
+        return cls(
+            model=metadata.get("model", "llama3"),
+            input=OllamaInput(messages=messages),
+            temperature=metadata.get("temperature", 0.7),
+            max_tokens=metadata.get("max_tokens"),
+            response_format=metadata.get("response_format"),
+            tools=metadata.get("tools"),
+            save_mode=metadata.get("save_mode", "postgres"),
+            options=metadata.get("options", {}),
+            **{
+                k: v
+                for k, v in metadata.items()
+                if k
+                not in [
+                    "model",
+                    "temperature",
+                    "max_tokens",
+                    "response_format",
+                    "tools",
+                    "save_mode",
+                    "options",
+                ]
+            },
+            **kwargs,
+        )
 
     def to_ollama_dict(self) -> dict[str, Any]:
         """Required by chat_turn_ollama.py and chat_stream_ollama.py."""
@@ -572,6 +674,8 @@ class OllamaResponse(BaseModel, LLMRequestProtocol):
     -------
     meta, payload, endpoint
         Protocol implementations (rich telemetry included in both).
+    to_neutral_format
+        Convert an Ollama response into the canonical neutral format.
     from_dict, extract_response_snippet
         Helpers used by the client layer.
 
@@ -664,6 +768,47 @@ class OllamaResponse(BaseModel, LLMRequestProtocol):
             eval_duration=data.get("eval_duration"),
             raw=data,
         )
+
+    def to_neutral_format(self, branch_info: dict | None = None) -> dict:
+        """
+        Convert an Ollama response into the canonical neutral format.
+
+        The returned dict becomes the ``response`` field inside
+        ``NeutralResponseBlob`` and is what gets stored in the ``response``
+        JSONB column. All provider-specific fields are mapped to the common
+        keys expected by the rest of the system (``content``, ``structured``,
+        ``finish_reason``, ``usage``, etc.).
+
+        Parameters
+        ----------
+        branch_info : dict, optional
+            Branching metadata (``tree_id``, ``branch_id``, ``parent_response_id``,
+            ``sequence``) that will be embedded in the ``branch_meta`` key of
+            the neutral turn. Usually supplied by ``persist_chat_turn``.
+
+        Returns
+        -------
+        dict
+            A plain dictionary conforming to the ``NeutralTurn`` schema.
+            Suitable for direct construction of ``NeutralTurn(**result)`` or
+            for inclusion in ``NeutralResponseBlob``.
+
+        See Also
+        --------
+        NeutralTurn : the target schema.
+        xAIResponse.to_neutral_format : the equivalent converter for xAI.
+        """
+        return {
+            "role": "assistant",
+            "content": self.text,
+            "structured": self.parsed,
+            "finish_reason": self.done_reason,
+            "usage": self.usage,
+            "tools": self.tool_calls,
+            "raw": self.raw,
+            "timestamp": datetime.utcnow().isoformat(),
+            "branch_meta": branch_info or {},
+        }
 
     def extract_response_snippet(self, max_chars: int = 200) -> str:
         txt = self.text

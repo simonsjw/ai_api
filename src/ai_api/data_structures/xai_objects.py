@@ -94,6 +94,8 @@ base_objects : the protocols this module satisfies
 ollama_objects : the mirrored local-backend implementation
 """
 
+from __future__ import annotations
+
 import time
 import uuid
 from dataclasses import dataclass, field, replace
@@ -118,6 +120,7 @@ from .base_objects import (
     LLMRequestProtocol,
     LLMResponseProtocol,
     LLMStreamingChunkProtocol,
+    NeutralTurn,
     SaveMode,
 )
 
@@ -392,6 +395,65 @@ class xAIRequest(BaseModel, LLMRequestProtocol):
         if isinstance(self.input, str):
             return {"prompt": self.input, "input_type": "raw"}
         return {"messages": self.input.to_list(), "input_type": "chat"}
+
+    @classmethod
+    def from_neutral_history(
+        cls,
+        neutral_history: list[dict] | list[NeutralTurn],
+        new_prompt: str | list[dict],
+        metadata: dict[str, Any],
+        **kwargs,
+    ) -> "xAIRequest":
+        """
+        Reconstruct an xAIRequest from a slice of neutral history plus a new prompt.
+
+        Mirrors the contract of ``OllamaRequest.from_neutral_history`` so that
+        higher-level code (``ChatSession``, persistence layer) can treat all
+        providers uniformly.
+
+        Parameters
+        ----------
+        neutral_history : list of dict or NeutralTurn
+            Reconstructed conversation turns for the relevant branch/depth.
+        new_prompt : str or list of dict
+            The user message (plain text or multimodal content blocks) to append.
+        metadata : dict
+            Generation parameters and request settings (model, temperature,
+            max_tokens, response_format, tools, save_mode, prompt_cache_key, etc.).
+        **kwargs
+            Extra constructor arguments forwarded to ``xAIRequest``.
+
+        Returns
+        -------
+        xAIRequest
+            Ready-to-send request object for the xAI SDK.
+
+        See Also
+        --------
+        OllamaRequest.from_neutral_history : the equivalent for Ollama.
+        """
+        for turn in neutral_history:
+            if isinstance(turn, dict):
+                turn = NeutralTurn(**turn)
+            if turn.role in ("system", "user", "assistant", "developer"):
+                messages.append(xAIMessage(role=turn.role, content=turn.content))
+
+        if isinstance(new_prompt, str):
+            messages.append(xAIMessage(role="user", content=new_prompt))
+        else:
+            messages.append(xAIMessage(role="user", content=new_prompt))
+
+        return cls(
+            model=metadata.get("model", "grok-2"),
+            input=xAIInput(messages=messages),
+            temperature=metadata.get("temperature", 0.7),
+            max_tokens=metadata.get("max_tokens"),
+            response_format=metadata.get("response_format"),
+            tools=metadata.get("tools"),
+            save_mode=metadata.get("save_mode", "postgres"),
+            prompt_cache_key=metadata.get("prompt_cache_key"),
+            **kwargs,
+        )
 
     def endpoint(self) -> LLMEndpoint:
         """Return structured endpoint info (implements LLMRequestProtocol)."""

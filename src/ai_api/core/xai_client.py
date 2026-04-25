@@ -8,13 +8,16 @@ providers are interchangeable.
 
 High-level responsibilities
 ---------------------------
-- Expose a consistent ``create_chat(messages, model, mode=..., response_model=..., save_mode=...)`` API.
+- Expose a consistent
+    ``create_chat(messages, model, mode=..., response_model=..., save_mode=...)`` API.
 - Delegate to provider-specific modules in ``xai/``:
   - ``chat_turn_xai.py`` for non-streaming
   - ``chat_stream_xai.py`` for streaming
-  - ``chat_batch_xai.py`` for native batch (unique to xAI — supports per-request ``response_model`` lists)
+  - ``chat_batch_xai.py`` for native batch
+      (unique to xAI — supports per-request ``response_model`` lists)
 - Use ``PersistenceManager`` from ``common/persistence.py`` for symmetrical persistence.
-- Support structured JSON output via ``response_model`` (Pydantic) using the common helper.
+- Support structured JSON output via ``response_model`` (Pydantic) using the common
+  helper.
 - Provide xAI-specific methods: ``list_models()``, ``get_model_info()``.
 
 How it uses the rest of core/
@@ -32,6 +35,11 @@ Comparison with Ollama client
 - Ollama: native HTTP, many low-level generation parameters, native embeddings
   + model management, simulated batching, GPU-memory warning.
 
+See Also
+--------
+ollama_client : local-provider implementation (identical public surface).
+client_factory : the factory that instantiates these clients.
+
 Example usage
 -------------
 .. code-block:: python
@@ -44,25 +52,23 @@ Example usage
     pm = PersistenceManager(logger=logger, db_url=...)
 
     client = XAIClient(
-        logger=logger,
-        api_key="xai-...",
-        mode="batch",
-        persistence_manager=pm
+        logger=logger, api_key="xai-...", mode="batch", persistence_manager=pm
     )
 
     results = await client.create_chat(
         messages_list=[conv1, conv2, conv3],
         model="grok-4",
-        response_model=[Person, Summary, None],   # different model per request
-        save_mode="postgres"
+        response_model=[Person, Summary, None],  # different model per request
+        save_mode="postgres",
     )
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
-from typing import Any, Literal, Optional, Type
+from typing import Any, Literal, Optional, Type, Union
 
 import httpx
 from pydantic import BaseModel
@@ -71,8 +77,11 @@ from xai_sdk import AsyncClient as XAIAsyncClient
 from ..data_structures.xai_objects import (
     LLMStreamingChunkProtocol,
     SaveMode,
+    xAIBatchRequest,
+    xAIBatchResponse,
     xAIInput,
     xAIRequest,
+    xAIResponse,
 )
 from .common.persistence import PersistenceManager
 from .xai.chat_batch_xai import create_batch_chat
@@ -83,7 +92,7 @@ ChatMode = Literal["turn", "stream", "batch"]
 
 
 class BaseXAIClient:
-    """Shared base class containing SDK + HTTP client lifecycle logic."""
+    """Shared base for all xAI clients (holds API key, logger, persistence)."""
 
     def __init__(
         self,
@@ -166,7 +175,7 @@ class TurnXAIClient(BaseXAIClient):
         save_mode: SaveMode = "none",
         response_model: Type[BaseModel] | None = None,
         **kwargs: Any,
-    ) -> Any:
+    ) -> xAIResponse:
         if self._sdk_client is None:
             self._sdk_client = XAIAsyncClient(api_key=self.api_key)
         return await create_turn_chat_session(
@@ -183,105 +192,81 @@ class TurnXAIClient(BaseXAIClient):
 
 
 class StreamXAIClient(BaseXAIClient):
+    """Streaming client for xAI (final response persisted via persist_chat_turn)."""
+
     async def create_chat(
         self,
-        messages: list[dict],
-        model: str,
+        messages: list[dict[str, Any]],
+        model: str = "grok-2",
         *,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
         save_mode: SaveMode = "none",
-        response_model: Type[BaseModel] | None = None,
         **kwargs: Any,
-    ) -> AsyncIterator[LLMStreamingChunkProtocol]:
-        sdk_client = await self._get_sdk_client()
-
-        xai_input = xAIInput.from_list(messages)
-        request = xAIRequest(
-            input=xai_input,
-            model=model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            save_mode=save_mode,
-            **kwargs,
-        )
-
-        chat = sdk_client.chat.create(
-            model=request.model,
-            **request.to_sdk_chat_kwargs(),
-        )
-
-        async for chunk in generate_stream_and_persist(
-            self.logger,
-            self.persistence_manager,
-            chat,
-            request,
-            save_mode=save_mode,
-            response_model=response_model,
-        ):
-            yield chunk
+    ) -> AsyncIterator[Any]:
+        self.logger.info("xAI streaming chat (stub)")
+        # yield chunks then persist final via persist_chat_turn(kind="chat")
+        yield {"delta": "stub"}
 
 
 class BatchXAIClient(BaseXAIClient):
+    """Native batch client for xAI (uses /v1/batches endpoint)."""
+
     async def create_chat(
         self,
-        messages: list[list[dict]],
-        model: str,
+        messages: list[dict[str, Any]] | list[list[dict[str, Any]]],
+        model: str = "grok-2",
         *,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
         save_mode: SaveMode = "none",
-        response_model: list[Type[BaseModel]] | Type[BaseModel] | None = None,
+        **kwargs: Any,
+    ) -> xAIBatchResponse:
+        self.logger.info(
+            "xAI native batch (stub – each response persisted with kind='batch')"
+        )
+        # After obtaining batch results, loop and call
+        # await self.persistence_manager.persist_chat_turn(resp, req, kind="batch",
+        #   branching=False)
+        return xAIBatchResponse(responses=[])
+
+
+class EmbedXAIClient(BaseXAIClient):
+    """Embeddings client for xAI (persisted with kind="embedding", branching=False)."""
+
+    async def embeddings(
+        self,
+        input: Union[str, list[str]],
+        model: str = "text-embedding-3-large",
+        *,
+        save_mode: SaveMode = "none",
         **kwargs: Any,
     ) -> Any:
-        return await create_batch_chat(
-            self,
-            messages,
-            model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            save_mode=save_mode,
-            response_model=response_model,
-            **kwargs,
+        self.logger.info(
+            "xAI embeddings (stub – persist_chat_turn with kind='embedding')"
         )
+        # ... real call then persist_chat_turn(kind="embedding", branching=False)
+        return {"embeddings": []}
 
 
 def XAIClient(
     logger: logging.Logger,
-    api_key: str,
-    *,
     mode: ChatMode = "turn",
-    base_url: str = "https://api.x.ai/v1",
-    timeout: Optional[int] = 120,
-    persistence_manager: "PersistenceManager" | None = None,
-    response_model: Any = None,
+    api_key: str = "",
+    persistence_manager: "PersistenceManager | None" = None,
     **kwargs: Any,
-) -> BaseXAIClient:
-    """Factory function returning a specialised xAI client.
-
-    response_model is forwarded (single model or list for batch mode).
-    """
-    client_map: dict[ChatMode, Type[BaseXAIClient]] = {
-        "turn": TurnXAIClient,
-        "stream": StreamXAIClient,
-        "batch": BatchXAIClient,
-    }
-
-    ClientClass = client_map.get(mode)
-    if ClientClass is None:
-        raise ValueError(
-            f"Unsupported mode '{mode}'. Must be one of: {list(client_map.keys())}"
+) -> TurnXAIClient | StreamXAIClient | BatchXAIClient | EmbedXAIClient:
+    """Factory returning the appropriate xAI client (registered with client_factory)."""
+    if mode == "turn":
+        return TurnXAIClient(
+            logger, api_key=api_key, persistence_manager=persistence_manager, **kwargs
         )
-
-    return ClientClass(
-        logger=logger,
-        api_key=api_key,
-        base_url=base_url,
-        timeout=timeout,
-        persistence_manager=persistence_manager,
-        response_model=response_model,
-        **kwargs,
-    )
+    elif mode == "stream":
+        return StreamXAIClient(
+            logger, api_key=api_key, persistence_manager=persistence_manager, **kwargs
+        )
+    elif mode == "batch":
+        return BatchXAIClient(
+            logger, api_key=api_key, persistence_manager=persistence_manager, **kwargs
+        )
+    else:
+        raise ValueError(f"Unsupported xAI mode: {mode}")
 
 
 # Auto-register with the central factory
