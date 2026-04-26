@@ -102,7 +102,6 @@ from .ollama.chat_turn_ollama import create_turn_chat_session
 
 # Re-export the canonical implementation from embeddings_ollama.py
 from .ollama.embeddings_ollama import (
-    EmbedOllamaClient,
     OllamaEmbedResponse,
     create_embeddings,
 )
@@ -350,7 +349,7 @@ class StreamOllamaClient(BaseOllamaClient):
             save_mode=save_mode,
             **kwargs,                                                                     # tree/branch/parent/sequence
         ):
-            yield chunk
+            yield cast(LLMStreamingChunkProtocol, chunk)
 
 
 class BatchOllamaClient(BaseOllamaClient):
@@ -362,7 +361,7 @@ class BatchOllamaClient(BaseOllamaClient):
 
     async def create_chat(
         self,
-        messages: list[dict] | list[list[dict]],
+        messages: list[dict[str, Any]] | list[list[dict[str, Any]]],
         model: str,
         *,
         temperature: Optional[float] = None,
@@ -382,8 +381,7 @@ class BatchOllamaClient(BaseOllamaClient):
     ) -> list[OllamaResponse] | OllamaResponse:
         """Execute one or more chat turns (delegates to TurnOllamaClient).
 
-        When ``messages`` is a list of lists, each inner list is treated as
-        an independent conversation.  Results are returned in the same order.
+        Normalises input so that TurnOllamaClient **always** receives `list[dict[str, Any]]`.
         """
         turn_client = TurnOllamaClient(
             logger=self.logger,
@@ -392,40 +390,60 @@ class BatchOllamaClient(BaseOllamaClient):
             persistence_manager=self.persistence_manager,
         )
 
-        if isinstance(messages[0], dict):                                                 # single conversation
-            return await turn_client.create_chat(
-                messages,
-                model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                save_mode=save_mode,
-                **kwargs,
-            )
+        # === ROBUST NORMALISATION (fixes remaining type errors) ===
+        if not messages:
+            messages = []
 
-        # list of conversations
+        if isinstance(messages[0], dict):
+            # Single conversation → wrap it so the rest of the code only sees list-of-lists
+            messages = [messages]                                                         # type: ignore[assignment]
+
+        # Now we can safely cast — Pyrefly knows it's list[list[dict]]
+        conv_list: list[list[dict[str, Any]]] = cast(
+            list[list[dict[str, Any]]], messages
+        )
+
         if concurrent:
             tasks = [
                 turn_client.create_chat(
-                    m,
+                    conv,                                                                 # ← now guaranteed to be list[dict]
                     model,
                     temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                    seed=seed,
                     max_tokens=max_tokens,
+                    repeat_penalty=repeat_penalty,
+                    num_ctx=num_ctx,
+                    stop=stop,
+                    mirostat=mirostat,
+                    think=think,
                     save_mode=save_mode,
+                    response_model=response_model,
                     **kwargs,
                 )
-                for m in messages
+                for conv in conv_list
             ]
             return await asyncio.gather(*tasks)
         else:
             results: list[OllamaResponse] = []
-            for m in messages:
+            for conv in conv_list:
                 results.append(
                     await turn_client.create_chat(
-                        m,
+                        conv,                                                             # ← now guaranteed to be list[dict]
                         model,
                         temperature=temperature,
+                        top_p=top_p,
+                        top_k=top_k,
+                        seed=seed,
                         max_tokens=max_tokens,
+                        repeat_penalty=repeat_penalty,
+                        num_ctx=num_ctx,
+                        stop=stop,
+                        mirostat=mirostat,
+                        think=think,
                         save_mode=save_mode,
+                        response_model=response_model,
                         **kwargs,
                     )
                 )

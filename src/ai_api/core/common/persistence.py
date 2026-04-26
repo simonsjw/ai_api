@@ -412,6 +412,13 @@ class PersistenceManager:
         )
 
         if save_mode == "postgres" and self.db_url:
+            if hasattr(provider_response, "endpoint"):
+                endpoint = getattr(provider_response, "endpoint", lambda: {})()
+                if not isinstance(endpoint, dict):
+                    endpoint = endpoint.to_dict()
+            else:
+                endpoint = {}
+
             await self._insert_response_postgres(
                 tree_id=tree_id,
                 branch_id=branch_id,
@@ -419,9 +426,7 @@ class PersistenceManager:
                 sequence=sequence,
                 response_blob=response_blob,
                 meta=meta,
-                endpoint=getattr(provider_response, "endpoint", lambda: {})().to_dict()
-                if hasattr(provider_response, "endpoint")
-                else {},
+                endpoint=endpoint,
             )
         elif save_mode == "json_files":
             await self._persist_response_json(

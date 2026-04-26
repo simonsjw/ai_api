@@ -71,7 +71,8 @@ True
 >>> from src.ai_api.data_structures.xai_objects import xAIResponse
 >>> raw = {
 ...     "model": "grok-2-latest",
-...     "choices": [{"message": {"content": '{"name": "Paris", "population": 2100000}'}}],
+...     "choices": [{"message": {"content": '{"name": "Paris",
+...       "population": 2100000}'}}],
 ...     "usage": {"prompt_tokens": 42, "completion_tokens": 18},
 ... }
 >>> resp = xAIResponse.from_dict(raw)

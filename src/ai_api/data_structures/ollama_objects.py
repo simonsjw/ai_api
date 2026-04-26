@@ -519,16 +519,19 @@ class OllamaRequest(BaseModel, LLMRequestProtocol):
                 role="user", content=new_prompt[0].get("content") if new_prompt else ""
             )
             if isinstance(new_prompt, list) and len(new_prompt) > 1:
-                user_msg.images = [
-                    item.get("image")
-                    for item in new_prompt
-                    if item.get("type") == "image"
-                ]
+                replace(
+                    user_msg,
+                    images=[
+                        item.get("image")
+                        for item in new_prompt
+                        if item.get("type") == "image"
+                    ],
+                )
             messages.append(user_msg)
 
         return cls(
             model=metadata.get("model", "llama3"),
-            input=OllamaInput(messages=messages),
+            input=OllamaInput(messages=tuple(messages)),
             temperature=metadata.get("temperature", 0.7),
             max_tokens=metadata.get("max_tokens"),
             response_format=metadata.get("response_format"),
@@ -641,7 +644,7 @@ class OllamaRequest(BaseModel, LLMRequestProtocol):
 # Response (implements LLMResponseProtocol)
 # ----------------------------------------------------------------------
 @dataclass(frozen=True)
-class OllamaResponse(BaseModel, LLMRequestProtocol):
+class OllamaResponse(BaseModel, LLMResponseProtocol):
     """Ollama-native response (implements LLMResponseProtocol).
 
     Note: inherits from LLMRequestProtocol in the current code base (assumed
@@ -703,6 +706,7 @@ class OllamaResponse(BaseModel, LLMRequestProtocol):
     prompt_eval_duration: int | None = None
     eval_count: int | None = None
     eval_duration: int | None = None
+    usage: dict[str, Any] | None = None
     raw: dict[str, Any] = field(default_factory=dict)
     parsed: BaseModel | dict | None = None
 
@@ -766,6 +770,13 @@ class OllamaResponse(BaseModel, LLMRequestProtocol):
             prompt_eval_duration=data.get("prompt_eval_duration"),
             eval_count=data.get("eval_count"),
             eval_duration=data.get("eval_duration"),
+            usage=data.get("usage")
+            or {
+                "prompt_tokens": data.get("prompt_eval_count"),
+                "completion_tokens": data.get("eval_count"),
+                "total_tokens": (data.get("prompt_eval_count") or 0)
+                + (data.get("eval_count") or 0),
+            },
             raw=data,
         )
 
@@ -803,7 +814,12 @@ class OllamaResponse(BaseModel, LLMRequestProtocol):
             "content": self.text,
             "structured": self.parsed,
             "finish_reason": self.done_reason,
-            "usage": self.usage,
+            "usage": self.usage
+            or {
+                "prompt_tokens": self.prompt_eval_count,
+                "completion_tokens": self.eval_count,
+                "total_tokens": (self.prompt_eval_count or 0) + (self.eval_count or 0),
+            },
             "tools": self.tool_calls,
             "raw": self.raw,
             "timestamp": datetime.utcnow().isoformat(),
@@ -858,6 +874,40 @@ class OllamaStreamingChunk:
 
     def endpoint(self) -> LLMEndpoint:
         return LLMEndpoint(provider="ollama", model="streaming", api_type="native")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "OllamaStreamingChunk":
+        """Create an OllamaStreamingChunk from a raw JSON chunk received from Ollama's streaming endpoint.
+
+        Handles both incremental tokens and the final chunk (which includes
+        ``done_reason``, ``total_duration``, etc.).
+
+        Parameters
+        ----------
+        data : dict[str, Any]
+            Raw JSON object from Ollama (one line of the NDJSON stream).
+
+        Returns
+        -------
+        OllamaStreamingChunk
+            Fully populated chunk ready to be yielded to the caller.
+        """
+        message = data.get("message", {}) or {}
+        content = message.get("content", "") or ""
+
+        done = data.get("done", False)
+        done_reason = data.get("done_reason")
+        total_duration = data.get("total_duration")
+
+        return cls(
+            text=content,
+            finish_reason=done_reason if done else None,
+            tool_calls_delta=message.get("tool_calls"),
+            is_final=done,
+            raw=data,
+            done_reason=done_reason,
+            total_duration=total_duration,
+        )
 
 
 def parse_ollama_response(data: dict[str, Any]) -> OllamaResponse:
