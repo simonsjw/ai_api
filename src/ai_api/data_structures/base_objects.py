@@ -107,7 +107,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, Optional, TypedDict
+from typing import Any, Literal, Optional, Protocol, TypedDict, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -201,20 +201,21 @@ class LLMEndpoint:
         )
 
 
-class LLMRequestProtocol:
+@runtime_checkable
+class LLMRequestProtocol(Protocol):
     def endpoint(self) -> LLMEndpoint: ...
     def meta(self) -> dict[str, Any]: ...
     def payload(self) -> dict[str, Any]: ...
 
 
-class LLMResponseProtocol:
+class LLMResponseProtocol(Protocol):
     def endpoint(self) -> LLMEndpoint: ...
     def meta(self) -> dict[str, Any]: ...
     def payload(self) -> dict[str, Any]: ...
     def to_neutral_format(self, branch_info: dict | None = None) -> dict: ...
 
 
-class LLMStreamingChunkProtocol:
+class LLMStreamingChunkProtocol(Protocol):
     text: str
     finish_reason: str | None
     tool_calls_delta: list[dict] | None

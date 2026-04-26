@@ -35,8 +35,6 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from ..data_structures.base_objects import SaveMode
-
 
 @runtime_checkable
 class LLMProviderAdapter(Protocol):

@@ -533,11 +533,16 @@ class EmbedXAIClient(BaseXAIClient):
         # Optional persistence (embedding kind, no branching)
         if save_mode != "none" and self.persistence_manager is not None:
             try:
-                # Use the generic persist path; embedding responses are stored
-                # under kind="embedding" with branching=False
+                # Build a proper request object so we stay inside the protocol contract
+                embed_request = xAIRequest(
+                    model=model,
+                    input=" | ".join(input) if isinstance(input, list) else input,
+                    save_mode=save_mode,
+                    **kwargs,
+                )
                 await self.persistence_manager.persist_chat_turn(
-                    data,                                                                 # provider_response (dict fallback; real impl should wrap in protocol)
-                    {"input": input, "model": model},                                     # provider_request
+                    data,                                                                 # provider_response (still a dict for now — see note below)
+                    embed_request,                                                        # ← now correctly typed
                     kind="embedding",
                     branching=False,
                 )

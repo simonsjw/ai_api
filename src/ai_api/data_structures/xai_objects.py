@@ -105,9 +105,8 @@ from typing import (
     Any,
     Literal,
     Protocol,
+    Self,
     Sequence,
-    Type,
-    TypeVar,
     cast,
     runtime_checkable,
 )
@@ -120,12 +119,9 @@ from .base_objects import (
     LLMEndpoint,
     LLMRequestProtocol,
     LLMResponseProtocol,
-    LLMStreamingChunkProtocol,
     NeutralTurn,
     SaveMode,
 )
-
-T = TypeVar("T", bound="xAIJSONResponseSpec")
 
 __all__: list[str] = [
     "xAIMessage",
@@ -135,8 +131,6 @@ __all__: list[str] = [
     "xAIResponse",
     "xAIBatchResponse",
     "xAIStreamingChunk",
-    "LLMStreamingChunkProtocol",
-    "SaveMode",
     "Role",
     "xAIJSONResponseSpec",
     "JSON_INSTRUCTION",
@@ -221,11 +215,11 @@ class xAIJSONResponseSpec(BaseModel):
         }
 
     @classmethod
-    def parse_json(cls: type[T], json_data: str | bytes | bytearray) -> T:
+    def parse_json(cls, json_data: str | bytes | bytearray) -> Self:
         return cls.model_validate_json(json_data)
 
     @classmethod
-    def from_xai_response(cls: type[T], response: "xAIResponse | str") -> T:
+    def from_xai_response(cls, response: "xAIResponse | str") -> Self:
         if isinstance(response, str):
             json_data = response
         else:
@@ -433,6 +427,8 @@ class xAIRequest(BaseModel, LLMRequestProtocol):
         --------
         OllamaRequest.from_neutral_history : the equivalent for Ollama.
         """
+        messages: list[xAIMessage] = []
+
         for turn in neutral_history:
             if isinstance(turn, dict):
                 turn = NeutralTurn(**turn)
@@ -446,7 +442,7 @@ class xAIRequest(BaseModel, LLMRequestProtocol):
 
         return cls(
             model=metadata.get("model", "grok-2"),
-            input=xAIInput(messages=messages),
+            input=xAIInput(messages=tuple(messages)),
             temperature=metadata.get("temperature", 0.7),
             max_tokens=metadata.get("max_tokens"),
             response_format=metadata.get("response_format"),

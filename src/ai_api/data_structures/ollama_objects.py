@@ -110,7 +110,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
-from typing import Any, Literal, Optional, Protocol, Sequence, Type, TypeVar, cast
+from typing import Any, Literal, Protocol, Self, Sequence, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -122,9 +122,8 @@ from .base_objects import (
     NeutralPrompt,
     NeutralTurn,
     SaveMode,
+    runtime_checkable,
 )
-
-T = TypeVar("T", bound="OllamaJSONResponseSpec")
 
 __all__: list[str] = [
     "OllamaRole",
@@ -134,14 +133,10 @@ __all__: list[str] = [
     "OllamaResponse",
     "OllamaStreamingChunk",
     "OllamaJSONResponseSpec",
-    "LLMStreamingChunkProtocol",
     "SaveMode",
     "LLMRequestProtocol",                                                                 # re-exported
     "LLMResponseProtocol",                                                                # re-exported
 ]
-
-# Re-export the shared protocol and type so existing code imports from here unchanged
-from .xai_objects import LLMStreamingChunkProtocol, SaveMode                              # type: ignore
 
 type OllamaRole = Literal["system", "user", "assistant", "tool"]
 
@@ -200,13 +195,18 @@ class OllamaJSONResponseSpec(BaseModel):
         return self.model.model_json_schema()
 
     @classmethod
-    def parse_json(cls: type[T], json_data: str | bytes | bytearray) -> T:
+    def parse_json(cls, json_data: str | bytes | bytearray) -> Self:
         return cls.model_validate_json(json_data)
 
     @classmethod
-    def from_ollama_response(cls: type[T], response: "OllamaResponse | str") -> T:
-        text = response.text if isinstance(response, OllamaResponse) else response
-        return cls.parse_json(text)
+    def from_ollama_response(cls, response: "OllamaResponse | str") -> Self:
+        if isinstance(response, str):
+            json_data = response
+        else:
+            if not response.text:
+                raise ValueError("OllamaResponse contains no text content to parse")
+            json_data = response.text
+        return cls.parse_json(json_data)
 
 
 # ----------------------------------------------------------------------

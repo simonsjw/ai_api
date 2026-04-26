@@ -37,8 +37,11 @@ Example usage (recommended unified style)
 
     # Ollama streaming
     ollama = get_llm_client(
-        "ollama", logger=logger, mode="stream",
-        host="http://localhost:11434", persistence_manager=pm
+        "ollama",
+        logger=logger,
+        mode="stream",
+        host="http://localhost:11434",
+        persistence_manager=pm,
     )
     async for chunk in ollama.create_chat(messages=..., model="llama3.2"):
         ...
@@ -46,14 +49,13 @@ Example usage (recommended unified style)
     # xAI batch with per-request structured output
     xai = get_llm_client("xai", logger=logger, mode="batch", api_key=...)
     results = await xai.create_chat(
-        messages_list=[...], model="grok-4",
-        response_model=[PersonModel, SummaryModel, ...]
+        messages_list=[...], model="grok-4", response_model=[PersonModel, SummaryModel, ...]
     )
 
 See Also
 --------
 ai_api.core.base_provider.LLMProviderAdapter
-ai_api.core.ollama_client, ai_api.core.xai_client
+ai_api.core.ollama_client.py, ai_api.core.xai_client.py
     The concrete clients that get registered.
 ai_api.core.common
     Shared persistence, errors, and structured-output helpers used by all.
@@ -131,9 +133,9 @@ def get_llm_client(
     if provider not in PROVIDER_REGISTRY:
         # Lazy auto-register for built-in providers
         if provider == "ollama":
-            from . import ollama_client  # noqa: F401 - triggers register_provider
+            from . import ollama_client                                                   # noqa: F401 - triggers register_provider
         elif provider == "xai":
-            from . import xai_client  # noqa: F401 - triggers register_provider
+            from . import xai_client                                                      # noqa: F401 - triggers register_provider
         else:
             raise ValueError(
                 f"Unknown provider '{provider}'. "
@@ -142,7 +144,7 @@ def get_llm_client(
             )
 
     mode_map = PROVIDER_REGISTRY[provider]
-    ClientClass: Type = mode_map.get(mode)  # type: ignore[assignment]
+    ClientClass: Type = mode_map.get(mode)                                                # type: ignore[assignment]
     if ClientClass is None:
         raise ValueError(
             f"Mode '{mode}' is not supported for provider '{provider}'. "
@@ -151,4 +153,4 @@ def get_llm_client(
 
     # Instantiate the chosen class. All provider classes accept the same common kwargs
     # (logger, persistence_manager, timeout, ...) plus their own required ones.
-    return ClientClass(logger=logger, **kwargs)  # type: ignore[call-arg]
+    return ClientClass(logger=logger, **kwargs)                                           # type: ignore[call-arg]
