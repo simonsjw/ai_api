@@ -42,8 +42,6 @@ ai_api.core.ollama.chat_turn_ollama
     The Ollama equivalent (native HTTP).
 """
 
-from __future__ import annotations
-
 import logging
 from typing import Any, Type
 
@@ -52,6 +50,8 @@ from pydantic import BaseModel
 from ...data_structures.xai_objects import xAIRequest, xAIResponse
 from ..common.persistence import PersistenceManager
 from ..common.response_struct import create_json_response_spec
+
+__all__: list[str] = ["create_turn_chat_session"]
 
 
 async def create_turn_chat_session(

@@ -39,14 +39,14 @@ ai_api.core.ollama_client.BatchOllamaClient
     The simulated batch implementation for Ollama.
 """
 
-from __future__ import annotations
-
 from typing import Any, Type
 
 from pydantic import BaseModel
 
 from ...data_structures.xai_objects import xAIRequest
 from ..common.response_struct import create_json_response_spec
+
+__all__: list[str] = ["create_batch_chat"]
 
 
 async def create_batch_chat(
@@ -107,7 +107,7 @@ async def create_batch_chat(
         if isinstance(response_model, list):
             current_rm = response_model[idx]
         else:
-            current_rm = response_model  # None or single shared model
+            current_rm = response_model                                                   # None or single shared model
 
         # Build request
         request = xAIRequest(

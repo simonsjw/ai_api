@@ -107,6 +107,7 @@ from typing import (
     Protocol,
     Self,
     Sequence,
+    Type,
     cast,
     runtime_checkable,
 )
@@ -134,8 +135,6 @@ __all__: list[str] = [
     "Role",
     "xAIJSONResponseSpec",
     "JSON_INSTRUCTION",
-    "LLMRequestProtocol",                                                                 # re-exported
-    "LLMResponseProtocol",                                                                # re-exported
 ]
 
 

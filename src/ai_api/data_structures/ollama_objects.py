@@ -122,7 +122,6 @@ from .base_objects import (
     NeutralPrompt,
     NeutralTurn,
     SaveMode,
-    runtime_checkable,
 )
 
 __all__: list[str] = [
@@ -132,11 +131,11 @@ __all__: list[str] = [
     "OllamaRequest",
     "OllamaResponse",
     "OllamaStreamingChunk",
-    "OllamaJSONResponseSpec",
-    "SaveMode",
-    "LLMRequestProtocol",                                                                 # re-exported
-    "LLMResponseProtocol",                                                                # re-exported
+    "OllamaJSONResponseSpec",                                                             # re-exported
 ]
+
+# Re-export the shared protocol and type so existing code imports from here unchanged
+from .xai_objects import LLMStreamingChunkProtocol, SaveMode                              # type: ignore
 
 type OllamaRole = Literal["system", "user", "assistant", "tool"]
 

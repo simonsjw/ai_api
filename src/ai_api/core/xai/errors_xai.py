@@ -36,20 +36,18 @@ ai_api.core.ollama.errors_ollama
     The simpler Ollama counterpart.
 """
 
-from __future__ import annotations
-
 import asyncio
 from typing import Any
 
 try:
     import asyncpg
 except ImportError:
-    asyncpg = None  # type: ignore[assignment]
+    asyncpg = None                                                                        # type: ignore[assignment]
 
 try:
     import grpc
 except ImportError:
-    grpc = None  # type: ignore[assignment]
+    grpc = None                                                                           # type: ignore[assignment]
 
 # NEW: import shared generic base
 from ..common.errors import (

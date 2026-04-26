@@ -88,8 +88,6 @@ ai_api.core.xai.chat_turn_xai, chat_stream_xai, chat_batch_xai : Delegated logic
 ai_api.core.common.persistence.PersistenceManager : Symmetrical request/response storage.
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 from collections.abc import AsyncIterator
@@ -99,8 +97,8 @@ import httpx
 from pydantic import BaseModel
 from xai_sdk import AsyncClient as XAIAsyncClient
 
+from ..data_structures.base_objects import LLMStreamingChunkProtocol
 from ..data_structures.xai_objects import (
-    LLMStreamingChunkProtocol,
     SaveMode,
     xAIBatchResponse,
     xAIInput,
@@ -111,6 +109,16 @@ from .common.persistence import PersistenceManager
 from .xai.chat_batch_xai import create_batch_chat
 from .xai.chat_stream_xai import generate_stream_and_persist
 from .xai.chat_turn_xai import create_turn_chat_session
+
+__all__: list[str] = [
+    "ChatMode",
+    "BaseXAIClient",
+    "TurnXAIClient",
+    "StreamXAIClient",
+    "BatchXAIClient",
+    "EmbedXAIClient",
+    "XAIClient",
+]
 
 ChatMode = Literal["turn", "stream", "batch"]
 

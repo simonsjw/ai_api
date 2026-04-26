@@ -32,6 +32,8 @@ from ai_api.data_structures.xai_objects import xAIRequest, xAIResponse
 
 from .persistence import PersistenceManager
 
+__all__: list[str] = ["ChatSession", "create_or_continue_chat"]
+
 
 class ChatSession:
     """

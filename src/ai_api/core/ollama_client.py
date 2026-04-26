@@ -106,6 +106,17 @@ from .ollama.embeddings_ollama import (
     create_embeddings,
 )
 
+__all__: list[str] = [
+    "ChatMode",
+    "BaseOllamaClient",
+    "TurnOllamaClient",
+    "StreamOllamaClient",
+    "BatchOllamaClient",
+    "EmbedOllamaClient",
+    "OllamaClient",
+]
+
+
 ChatMode = Literal["turn", "stream", "batch"]
 
 

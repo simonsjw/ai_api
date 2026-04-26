@@ -82,8 +82,6 @@ ai_api.data_structures.xai_objects.xAIJSONResponseSpec
     The concrete spec classes returned by `create_json_response_spec`.
 """
 
-from __future__ import annotations
-
 from typing import Any, AsyncIterator, Type
 
 from pydantic import BaseModel
@@ -92,6 +90,12 @@ from ...data_structures.base_objects import (
     LLMResponseProtocol,
     LLMStreamingChunkProtocol,
 )
+
+__all__: list[str] = [
+    "create_json_response_spec",
+    "generate_structured_json",
+    "generate_structured_json_stream",
+]
 
 
 def create_json_response_spec(

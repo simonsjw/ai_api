@@ -61,10 +61,16 @@ ai_api.core.common
     Shared persistence, errors, and structured-output helpers used by all.
 """
 
-from __future__ import annotations
-
 import logging
 from typing import Any, Literal, Type
+
+__all__: list[str] = [
+    "ChatMode",
+    "PROVIDER_REGISTRY",
+    "register_provider",
+    "get_llm_client",
+]
+
 
 ChatMode = Literal["turn", "stream", "batch"]
 

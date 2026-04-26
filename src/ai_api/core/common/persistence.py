@@ -112,6 +112,8 @@ from ai_api.data_structures.base_objects import (
 
 from ...data_structures.base_objects import SaveMode
 
+__all__: list[str] = ["PersistenceManager", "persist_batch_requests"]
+
 
 class PersistenceManager:
     """Unified, branch-aware persistence layer for every LLM interaction type.

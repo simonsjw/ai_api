@@ -31,9 +31,9 @@ ai_api.core.common.response_struct
     Generic helpers that accept any object satisfying this protocol.
 """
 
-from __future__ import annotations
-
 from typing import Any, Protocol, runtime_checkable
+
+__all__: list[str] = ["LLMProviderAdapter"]
 
 
 @runtime_checkable

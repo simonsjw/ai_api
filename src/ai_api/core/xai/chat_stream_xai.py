@@ -32,8 +32,6 @@ ai_api.core.ollama.chat_stream_ollama
     The Ollama streaming implementation (native HTTP).
 """
 
-from __future__ import annotations
-
 import logging
 from typing import Any, AsyncIterator, Type
 
@@ -42,6 +40,8 @@ from pydantic import BaseModel
 from ...data_structures.xai_objects import xAIRequest, xAIResponse, xAIStreamingChunk
 from ..common.persistence import PersistenceManager
 from ..common.response_struct import create_json_response_spec
+
+__all__: list[str] = ["generate_stream_and_persist"]
 
 
 async def generate_stream_and_persist(
@@ -101,7 +101,7 @@ async def generate_stream_and_persist(
                 raw=chunk.raw,
             )
 
-            # 3. validate with response specification if provided.
+    # 3. validate with response specification if provided.
     if response_model is not None and final_response is not None:
         try:
             parsed = response_model.model_validate_json("".join(full_text))
@@ -111,7 +111,7 @@ async def generate_stream_and_persist(
                 "Failed to parse final structured chunk", extra={"error": str(exc)}
             )
 
-            # 4. Persist the final response (symmetrical protocol style)
+    # 4. Persist the final response (symmetrical protocol style)
     if (
         save_mode != "none"
         and persistence_manager is not None
