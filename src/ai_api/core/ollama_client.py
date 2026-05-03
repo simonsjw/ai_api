@@ -80,41 +80,34 @@ Example usage
 
 from __future__ import annotations
 
-import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any, Literal, Optional, Type, cast
 
 import httpx
-import py_pgkit as pgk
-from py_pgkit import PgSettings
-from py_pgkit.db import PgSettings
 from pydantic import BaseModel
 
 from ai_api.core.common.persistence import PersistenceManager
 
+from ..data_structures.base_objects import LLMStreamingChunkProtocol
 from ..data_structures.ollama_objects import (
-    LLMStreamingChunkProtocol,
     OllamaInput,
-    OllamaJSONResponseSpec,
-    OllamaMessage,
     OllamaRequest,
     OllamaResponse,
-    OllamaRole,
-    OllamaStreamingChunk,
     SaveMode,
 )
 from .client_factory import register_provider
 from .common.persistence import PersistenceManager
+from .ollama.chat_batch_ollama import create_batch_chat
 from .ollama.chat_stream_ollama import generate_stream_and_persist
 from .ollama.chat_turn_ollama import create_turn_chat_session
-from .ollama.chat_batch_ollama import create_batch_chat
 
 # Re-export the canonical implementation from embeddings_ollama.py
 from .ollama.embeddings_ollama import (
     OllamaEmbedResponse,
     create_embeddings,
 )
+from .ollama.errors_ollama import wrap_ollama_api_error
 
 __all__: list[str] = [
     "ChatMode",
@@ -216,8 +209,11 @@ class BaseOllamaClient:
             data = resp.json()
             return data.get("models", [])
         except Exception as exc:
-            self.logger.error("Failed to list Ollama models", extra={"error": str(exc)})
-            raise
+            self.logger.error(
+                "Failed to list Ollama models",
+                extra={"error": str(exc), "error_type": type(exc).__name__},
+            )
+            raise wrap_ollama_api_error(exc, "Failed to list Ollama models") from exc
 
     async def pull_model(
         self, name: str, stream: bool = False
@@ -282,6 +278,7 @@ class TurnOllamaClient(BaseOllamaClient):
         think: Optional[bool] = None,
         save_mode: SaveMode = "none",
         response_model: type["BaseModel"] | None = None,
+        strict_structured_output: bool = False,
         **kwargs: Any,
     ) -> OllamaResponse:
         """Create a single non-streaming chat turn (delegates to create_turn_chat_session).
@@ -294,6 +291,7 @@ class TurnOllamaClient(BaseOllamaClient):
             self,
             messages or [],
             model=model,
+            strict_structured_output=strict_structured_output,
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,

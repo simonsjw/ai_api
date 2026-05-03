@@ -1,78 +1,47 @@
 """
-Ollama embeddings (non-conversational path).
+Ollama embeddings (non-conversational path) with GPU memory availability checks.
 
-This module implements ``create_embeddings`` (called by
-``EmbedOllamaClient.create_chat``). It generates vector embeddings for
-one or more input strings using Ollama's embeddings endpoint and persists
-the interaction via the unified ``persist_chat_turn`` path.
+This module implements ``create_embeddings`` (called by ``EmbedOllamaClient.create_chat``).
+It generates vector embeddings using Ollama's ``/api/embeddings`` (or ``/api/embed``)
+endpoint and persists via the unified ``persist_chat_turn`` path with ``kind="embedding"``.
 
-Branching policy
+GPU Memory Check
 ----------------
-Embeddings are **never** part of a conversation tree. The implementation
-hard-codes ``branching=False`` (and does not accept or forward
-``tree_id``/``branch_id`` etc.). This keeps the ``responses`` table clean
-and avoids polluting the recursive CTE used by
-``reconstruct_neutral_branch``.
-
-Error Handling
---------------
-- HTTP / transport errors (connection refused, 4xx/5xx, timeouts) from the
-  ``/api/embeddings`` endpoint are wrapped as ``OllamaAPIError`` (via
-  ``wrap_ollama_api_error``).
-- JSON parsing or response-shape errors are wrapped as
-  ``OllamaClientError``.
-- Persistence failures are non-fatal (logged at WARNING with rich context
-  via ``wrap_persistence_error``) so the caller still receives the embeddings.
-- All raised exceptions inherit from ``AIAPIError`` (directly or indirectly),
-  enabling uniform ``except AIAPIError`` handling at higher layers.
+The embedding POST is wrapped with the same ``is_ollama_gpu_memory_error`` +
+``wrap_ollama_gpu_mem_error`` logic used by chat methods. Embedding models
+can still trigger VRAM exhaustion on consumer GPUs when the model is large
+or many texts are embedded in one call.
 
 See Also
 --------
-chat_turn_ollama, chat_stream_ollama : conversational paths that do accept
-    and forward branching metadata.
-ai_api.core.common.persistence.PersistenceManager.persist_chat_turn
-    The unified persistence method (called with ``kind="embedding"``).
-ai_api.core.common.chat_session : high-level ``ChatSession`` (embeddings
-    are typically called directly on the client, not through ``ChatSession``).
+chat_turn_ollama, chat_stream_ollama : same GPU guard pattern.
+ai_api.core.ollama.errors_ollama : central detector + wrapper.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Union
 
 import httpx
 
 from ...data_structures.ollama_objects import OllamaRequest
-from ..common.errors import wrap_client_error, wrap_persistence_error
-from .errors_ollama import wrap_ollama_api_error
-
-__all__: list[str] = ["create_embeddings", "OllamaEmbedResponse"]
+from .errors_ollama import (
+    is_ollama_gpu_memory_error,
+    wrap_ollama_api_error,
+    wrap_ollama_gpu_mem_error,
+)
 
 
 class OllamaEmbedResponse:
-    """Lightweight container for Ollama embedding results.
-
-    Attributes
-    ----------
-    model : str
-        The model that produced the embedding(s).
-    embeddings : list[list[float]] or list[float]
-        For a single input: a 1-D list of floats.
-        For batch input: a list of 1-D lists (one per input string).
-    usage : dict
-        Token counts and timing information returned by Ollama (when
-        available).
-    raw : dict
-        The exact JSON payload returned by the ``/api/embeddings`` endpoint
-        (useful for debugging or future fields).
-    """
+    """Lightweight container for Ollama embedding results."""
 
     def __init__(
         self,
         model: str,
         embeddings: list[Any],
-        usage: dict[str, Any],
-        raw: dict[str, Any],
+        usage: dict,
+        raw: dict,
     ):
         self.model = model
         self.embeddings = embeddings
@@ -80,12 +49,6 @@ class OllamaEmbedResponse:
         self.raw = raw
 
     def to_neutral_format(self, branch_info: dict | None = None) -> dict[str, Any]:
-        """Convert embedding result to the neutral format expected by persistence.
-
-        The neutral turn uses ``role="embedding"`` and stores the vector(s)
-        under ``content`` (JSON-serialised) so that the same ``responses``
-        table can hold both chat turns and embeddings without schema changes.
-        """
         return {
             "role": "embedding",
             "content": self.embeddings,
@@ -105,62 +68,30 @@ async def create_embeddings(
     save_mode: str = "none",
     **kwargs: Any,
 ) -> OllamaEmbedResponse:
-    """Generate embeddings for one or more strings and persist the call.
-
-    This is the single source of truth for all embedding work with Ollama.
-    It is called by ``EmbedOllamaClient.embeddings`` and by any code that
-    needs a vector representation of text.
+    """Generate embeddings for one or more strings (with GPU memory guard).
 
     Parameters
     ----------
     client : BaseOllamaClient
         Client instance providing logger, persistence_manager and HTTP client.
     input : str or list of str
-        Text(s) to embed.  A single string produces a single vector; a list
-        produces a list of vectors (batch mode).
+        Text(s) to embed.
     model : str, default "nomic-embed-text"
-        Ollama embedding model (must be pulled locally).
+        Ollama embedding model.
     save_mode : {"none", "json_files", "postgres"}, default "none"
-        When not ``"none"`` the embedding call is persisted via
-        ``persist_chat_turn`` with ``kind="embedding"`` and ``branching=False``.
     **kwargs
-        Extra parameters forwarded to the Ollama ``/api/embeddings`` payload
-        (e.g. ``options``, ``keep_alive``) and to ``persist_chat_turn``.
+        Extra parameters forwarded to the Ollama ``/api/embeddings`` payload.
 
     Returns
     -------
     OllamaEmbedResponse
-        Container with ``.embeddings``, ``.model``, ``.usage`` and the raw
-        Ollama payload.
 
     Raises
     ------
-    OllamaAPIError
-        If the embeddings endpoint returns a non-2xx status or transport error.
-    OllamaClientError
-        If the response payload is malformed or cannot be parsed.
-
-    Examples
-    --------
-    Single embedding with Postgres persistence
-    >>> emb = await create_embeddings(
-    ...     client,
-    ...     input="The quick brown fox",
-    ...     model="nomic-embed-text",
-    ...     save_mode="postgres",
-    ... )
-    >>> len(emb.embeddings)
-    768
-
-    Batch embeddings (no persistence)
-    >>> embs = await create_embeddings(
-    ...     client,
-    ...     input=["doc1", "doc2", "doc3"],
-    ...     model="nomic-embed-text",
-    ...     save_mode="none",
-    ... )
-    >>> len(embs.embeddings)
-    3
+    OllamaGPUMemoryWarning
+        If the local GPU cannot allocate enough VRAM for the embedding model.
+    httpx.HTTPStatusError (wrapped)
+        For other API errors.
     """
     logger = client.logger
     logger.info(
@@ -178,16 +109,19 @@ async def create_embeddings(
         resp = await http_client.post("/api/embeddings", json=payload)
         resp.raise_for_status()
         raw = resp.json()
-    except httpx.HTTPError as exc:
-        raise wrap_ollama_api_error(
-            exc, f"Ollama embeddings request failed for model '{model}'"
-        ) from exc
     except Exception as exc:
-        raise wrap_client_error(
-            exc, f"Failed to parse embeddings response for model '{model}'"
-        ) from exc
+        if is_ollama_gpu_memory_error(exc):
+            raise wrap_ollama_gpu_mem_error(
+                exc,
+                f"GPU memory exhausted while generating embeddings with model '{model}' "
+                "(embedding models can still require substantial VRAM on large inputs)",
+            ) from exc
+        if isinstance(exc, httpx.HTTPStatusError):
+            raise wrap_ollama_api_error(
+                exc, f"Ollama embeddings request failed for model '{model}'"
+            ) from exc
+        raise
 
-    # Ollama returns {"embedding": [...]} for single or {"embeddings": [[...], ...]} for batch
     embeddings = raw.get("embeddings") or raw.get("embedding") or []
     usage = raw.get("usage", {})
 
@@ -195,12 +129,9 @@ async def create_embeddings(
         model=model, embeddings=embeddings, usage=usage, raw=raw
     )
 
-    # ------------------------------------------------------------------
-    # Persist via unified entry point (non-chat, no branching)
-    # ------------------------------------------------------------------
+    # Persist (non-chat, no branching)
     if save_mode != "none" and client.persistence_manager is not None:
         try:
-            # Build a minimal request object so the prompt is recorded
             req = OllamaRequest(model=model, input=input, save_mode=save_mode, **kwargs)
             await client.persistence_manager.persist_chat_turn(
                 provider_response=response,
@@ -209,12 +140,8 @@ async def create_embeddings(
                 branching=False,
             )
         except Exception as exc:
-            wrapped = wrap_persistence_error(
-                exc, f"Embedding persistence failed for model '{model}' (continuing)"
-            )
             logger.warning(
-                wrapped.message,
-                extra={"details": wrapped.details, "error": str(exc)},
+                "Embedding persistence failed (continuing)", extra={"error": str(exc)}
             )
 
     logger.info("Ollama embeddings completed", extra={"model": model})

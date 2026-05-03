@@ -282,6 +282,7 @@ class TurnXAIClient(BaseXAIClient):
         max_tokens: Optional[int] = None,
         save_mode: SaveMode = "none",
         response_model: Type[BaseModel] | None = None,
+        strict_structured_output: bool = False,
         **kwargs: Any,
     ) -> xAIResponse:
         """Create a single non-streaming chat turn (delegates to create_turn_chat_session).
@@ -323,6 +324,7 @@ class TurnXAIClient(BaseXAIClient):
             max_tokens=max_tokens,
             save_mode=save_mode,
             response_model=response_model,
+            strict_structured_output=strict_structured_output,
             **kwargs,
         )
 

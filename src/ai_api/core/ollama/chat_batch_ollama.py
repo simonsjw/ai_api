@@ -38,11 +38,12 @@ xai.chat_batch_xai : Native batch implementation (different concurrency model).
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Optional, Type, cast
+from typing import TYPE_CHECKING, Any, Optional, Type
 
 from pydantic import BaseModel
 
-from ..data_structures.ollama_objects import OllamaResponse
+from ...data_structures.base_objects import SaveMode
+from ...data_structures.ollama_objects import OllamaResponse
 
 if TYPE_CHECKING:
     from ..ollama_client import TurnOllamaClient
@@ -63,7 +64,7 @@ async def create_batch_chat(
     stop: Optional[list[str]] = None,
     mirostat: Optional[int] = None,
     think: Optional[bool] = None,
-    save_mode: str = "none",
+    save_mode: SaveMode = "none",
     concurrent: bool = False,
     response_model: Type[BaseModel] | None = None,
     **kwargs: Any,

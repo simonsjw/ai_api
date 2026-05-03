@@ -52,10 +52,8 @@ from typing import Any, Type
 from pydantic import BaseModel
 
 from ...data_structures.xai_objects import xAIRequest, xAIResponse
-from ..common.persistence import PersistenceManager
 from ..common.response_struct import create_json_response_spec
-from .errors_xai import wrap_xai_api_error, xAIAPIError
-
+from .errors_xai import wrap_xai_api_error, xAIStructuredOutputError
 
 __all__: list[str] = ["create_turn_chat_session"]
 
@@ -70,6 +68,7 @@ async def create_turn_chat_session(
     max_tokens: int | None = None,
     save_mode: str = "none",
     response_model: Type[BaseModel] | None = None,
+    strict_structured_output: bool = False,
     **kwargs: Any,
 ) -> xAIResponse:
     """Create a single turn-based (non-streaming) chat completion with xAI.
@@ -100,6 +99,10 @@ async def create_turn_chat_session(
     response_model : type[BaseModel] or None, optional
         Pydantic model for structured output. Converted internally via
         ``create_json_response_spec``.
+    strict_structured_output : bool, default False
+        If True and ``response_model`` is supplied, raise ``xAIStructuredOutputError``
+        on Pydantic validation failure instead of logging a warning and continuing
+        with raw text. Useful for pipelines that require guaranteed parsed objects.
     **kwargs : Any
         Forwarded to ``xAIRequest`` and to ``persist_chat_turn``.
         Branching keys (``tree_id``, ``branch_id``, ``parent_response_id``,
@@ -111,7 +114,8 @@ async def create_turn_chat_session(
     -------
     xAIResponse
         Completed response object. If ``response_model`` was supplied,
-        the ``.parsed`` attribute contains the validated Pydantic instance.
+        the ``.parsed`` attribute contains the validated Pydantic instance
+        (unless ``strict_structured_output=False`` and parsing failed).
 
     Raises
     ------
@@ -121,10 +125,11 @@ async def create_turn_chat_session(
         rate-limit errors, invalid requests, connection failures, and
         generic SDK exceptions. The original exception is preserved in
         ``__cause__``.
-    Exception
-        Structured-output parsing failures are logged at WARNING level
-        but do not raise (the raw response is still returned).
-        Persistence failures are likewise non-fatal.
+    xAIStructuredOutputError
+        Only raised when ``strict_structured_output=True`` and Pydantic
+        validation of ``response.text`` fails. The raw response is still
+        attached to the exception's ``__cause__``. Persistence failures
+        are non-fatal (logged at WARNING).
 
     Notes
     -----
@@ -176,15 +181,33 @@ async def create_turn_chat_session(
         ) from exc
 
     # 4. Validate the response if a response specification is provided.
+    # We use best-effort parsing: on failure we log richly and continue with
+    # the raw text (response.parsed remains unset). This matches the library's
+    # "continue on non-fatal issues" contract (same as persistence errors).
+    # Callers who need guaranteed parsed objects can catch xAIStructuredOutputError
+    # in a wrapper or request a future strict_structured_output=True flag.
     if response_model is not None:
         try:
             parsed = response_model.model_validate_json(response.text)
             response.parsed = parsed
         except Exception as exc:
-            client.logger.warning(
-                "Failed to parse structured response – continuing with raw text",
-                extra={"error": str(exc), "model": model},
-            )
+            if strict_structured_output:
+                raise xAIStructuredOutputError(
+                    f"Failed to parse structured response for model '{model}' "
+                    "(strict mode enabled)",
+                    details={"original": type(exc).__name__},
+                ) from exc
+            else:
+                client.logger.warning(
+                    "Failed to parse structured response – continuing with raw text",
+                    extra={
+                        "error": str(exc),
+                        "model": model,
+                        "response_text_preview": (response.text or "")[:200],
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                # best-effort: return raw response (parsed left unset)
 
     # 5. Persist via unified entry point (handles request + response + branching)
     if save_mode != "none" and client.persistence_manager is not None:

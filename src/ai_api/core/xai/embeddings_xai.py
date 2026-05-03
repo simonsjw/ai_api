@@ -50,8 +50,7 @@ from typing import Any, Union
 import httpx
 
 from ...data_structures.xai_objects import xAIRequest
-from ..common.persistence import PersistenceManager
-from .errors_xai import wrap_xai_api_error, xAIAPIError
+from .errors_xai import wrap_xai_api_error
 
 
 class XAIEmbedResponse:
@@ -87,7 +86,7 @@ class XAIEmbedResponse:
     ...     model="text-embedding-3-large",
     ...     embeddings=[[0.1, 0.2, ...], [0.3, 0.4, ...]],
     ...     usage={"prompt_tokens": 10, "total_tokens": 10},
-    ...     raw={"object": "list", "data": [...]}
+    ...     raw={"object": "list", "data": [...]},
     ... )
     >>> len(resp.embeddings)
     2
@@ -105,7 +104,9 @@ class XAIEmbedResponse:
         self.usage = usage
         self.raw = raw
 
-    def to_neutral_format(self, branch_info: dict[str, Any] | None = None) -> dict[str, Any]:
+    def to_neutral_format(
+        self, branch_info: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """Convert embedding result to the neutral format used by persistence.
 
         The neutral turn stores embeddings under ``content`` (as JSON-serialisable
