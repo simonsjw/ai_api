@@ -2,62 +2,50 @@
 Shared generic error hierarchy for the entire ai_api package.
 
 This module defines a clean, provider-agnostic exception hierarchy rooted at
-`AIAPIError`. It serves as the single source of truth for error types used by
+``AIAPIError``. It serves as the single source of truth for error types used by
 all clients (Ollama, xAI, and future providers) in logging, persistence,
-database operations, and generic client logic.
+database operations, generic client logic, and cross-cutting concerns.
 
-What it does
-------------
-- Provides a shallow but complete taxonomy of errors that are truly common
-  across providers.
-- Supplies thin wrapper functions (`wrap_*_error`) that attach the original
-  exception as `__cause__` and enrich it with a `details` dict. This enables
-  rich logging and debugging without losing the original traceback.
+Design principles
+-----------------
+- **Shallow but complete taxonomy**: Only errors that are *truly common* across
+  providers live here. Provider-specific concerns (remote auth/rate-limits vs.
+  local GPU/memory) are defined in the per-provider modules
+  ``ai_api.core.xai.errors`` and ``ai_api.core.ollama.errors``.
+- **Direct imports only**: Consumers import exactly what they need from the
+  module where the class is *defined*. There are no pass-through convenience
+  imports or ``__init__.py`` re-exports that obscure the true location.
+  Example::
 
-How it does it
---------------
-- All exceptions inherit from `AIAPIError`, which stores `message` and
-  optional `details`.
-- Provider-specific errors (transport errors, model-specific quirks, API
-  rate limits, etc.) live in the per-provider `errors_*.py` modules and
-  inherit from these base classes (see `errors_xai.py` and `errors_ollama.py`).
-- The wrappers are convenience functions used throughout the codebase so that
-  every caught exception is turned into a properly typed `AIAPIError`
-  subclass with context.
+      from ai_api.core.common.errors import AIClientError, wrap_client_error
+      from ai_api.core.xai.errors import xAIAPIError, wrap_xai_api_error
 
-Examples — usage by clients
----------------------------
-Typical pattern in any chat / embedding / persistence code:
+- **Wrap-error pattern (standard across all modules)**: Every caught raw
+  exception (httpx, asyncpg, grpc, CUDA OOM, etc.) is converted via a
+  ``wrap_*_error(exc, message)`` helper. The helper:
+    1. Instantiates the appropriate typed error with a contextual ``message``.
+    2. Records ``details={"original": type(exc).__name__}`` for machine-readable
+       logging / metrics.
+    3. Attaches the original via ``wrapped.__cause__ = exc`` (preserves the
+       full exception chain and traceback for ``raise ... from exc``).
+  This pattern is implemented identically in ``common/errors.py``,
+  ``xai/errors.py`` and ``ollama/errors.py`` so that every error surfaced to
+  the user is a rich ``AIAPIError`` subclass.
 
-.. code-block:: python
+- **Multiple inheritance for client errors**: Provider client errors inherit
+  from both the provider root (``OllamaError`` / ``xAIError``) *and*
+  ``AIClientError``. This allows ``except AIClientError`` to catch all internal
+  client logic errors while still permitting provider-specific ``except``
+  clauses.
 
-    from ai_api.core.common.errors import (
-        wrap_client_error,
-        wrap_persistence_error,
-        AIClientError,
-    )
-
-    try:
-        response = await client.create_chat(...)
-    except Exception as exc:
-        raise wrap_client_error(exc, "Chat creation failed") from exc
-
-    # Or for persistence (used inside PersistenceManager and chat modules)
-    try:
-        rid, ts = await persistence_manager.persist_request(request)
-    except Exception as exc:
-        raise wrap_persistence_error(exc, "Failed to persist request") from exc
-
-    # Catching specific types
-    try:
-        ...
-    except AIClientError as e:
-        logger.error("Client error", extra={"details": e.details})
+All documentation follows the NumPy/SciPy style for consistency and
+readability.
 
 See Also
 --------
-ai_api.core.ollama.errors_ollama, ai_api.core.xai.errors_xai
-    Provider-specific error subclasses that inherit from the classes defined here.
+ai_api.core.xai.errors : xAI-specific extensions (auth, rate limits, gRPC,
+    thinking mode, multimodal, cache, batch).
+ai_api.core.ollama.errors : Ollama-specific extensions (GPU/memory warnings).
 """
 
 from __future__ import annotations
@@ -66,42 +54,46 @@ from typing import Any
 
 __all__: list[str] = [
     # Base
-    "AIAPIError",                                                                         # Root of the entire ai_api error hierarchy. Error message and context dict provided.
+    "AIAPIError",
     # Logger
-    "AILoggerError",                                                                      # Errors originating from the logger package (e.g. structlog, logging setup).
-    "AILoggerInitializationError",                                                        # Logger could not be initialised (missing handlers, invalid config, etc.)
+    "AILoggerError",
+    "AILoggerInitializationError",
     # Persistence (asyncpg / Postgres)
-    "AIPersistenceError",                                                                 # Errors originating from the persistence layer (PersistenceManager, asyncpg).
-    "AIPersistenceSettingsError",                                                         # Settings resolution or validation failed (bad db_url, missing json_dir, etc.).
-    "AIPersistencePoolError",                                                             # Failed to acquire or maintain a connection pool to Postgres.
+    "AIPersistenceError",
+    "AIPersistenceSettingsError",
+    "AIPersistencePoolError",
     # Database / Postgres
-    "AIDatabaseError",                                                                    # Errors from PostgreSQL / asyncpg operations.
-    "AIDatabaseConnectionError",                                                          # Failed to connect to or acquire a connection from Postgres.
-    "AIDatabaseQueryError",                                                               # SQL execution error (syntax, constraint violation, timeout, etc.).
+    "AIDatabaseError",
+    "AIDatabaseConnectionError",
+    "AIDatabaseQueryError",
     # Generic client errors
-    "AIClientError",                                                                      # Generic internal errors within any ai_api client (validation, state machine, usage).
+    "AIClientError",
     # Convenience wrappers (used by all providers)
-    "wrap_logger_error",                                                                  # Wrap any exception as an AILoggerError - original exception  type is recorded in `details["original"]`.
-    "wrap_persistence_error",                                                             # Wrap any exception as an AIPersistenceError - original exception  type is recorded in `details["original"]`.
-    "wrap_database_error",                                                                # Wrap any exception as an AIDatabaseError - original exception  type is recorded in `details["original"]`.
-    "wrap_client_error",                                                                  # Wrap any exception as an AIClientError - original exception  type is recorded in `details["original"]`.
+    "wrap_logger_error",
+    "wrap_persistence_error",
+    "wrap_database_error",
+    "wrap_client_error",
 ]
 
 
+# ----------------------------------------------------------------------
+# 1. Root of the hierarchy
+# ----------------------------------------------------------------------
 class AIAPIError(Exception):
     """Root of the entire ai_api error hierarchy.
 
     All other exceptions in the package inherit from this class, either
-    directly or indirectly. It provides a uniform `message` attribute and an
-    optional `details` dictionary for machine-readable context.
+    directly or indirectly. It provides a uniform ``message`` attribute and an
+    optional ``details`` dictionary for machine-readable context (e.g. for
+    structured logging or error reporting dashboards).
 
     Parameters
     ----------
     message : str
         Human-readable description of the error.
     details : dict[str, Any] or None, optional
-        Additional structured information (e.g. {"original": "ValueError",
-        "request_id": "..."}). Defaults to empty dict.
+        Additional structured information (e.g. ``{"original": "ValueError",
+        "request_id": "...", "model": "grok-4"}``). Defaults to empty dict.
 
     Attributes
     ----------
@@ -116,11 +108,10 @@ class AIAPIError(Exception):
         self.details = details or {}
         super().__init__(self.message)
 
-        # ----------------------------------------------------------------------
-        # 1. Logger errors (shared)
-        # ----------------------------------------------------------------------
 
-
+# ----------------------------------------------------------------------
+# 2. Logger errors (shared)
+# ----------------------------------------------------------------------
 class AILoggerError(AIAPIError):
     """Errors originating from the logger package (e.g. structlog, logging setup)."""
 
@@ -134,7 +125,7 @@ class AILoggerInitializationError(AILoggerError):
 
 
 # ----------------------------------------------------------------------
-# 2. Persistence / asyncpg errors (shared)
+# 3. Persistence / asyncpg errors (shared)
 # ----------------------------------------------------------------------
 class AIPersistenceError(AIAPIError):
     """Errors originating from the persistence layer (PersistenceManager, asyncpg)."""
@@ -155,7 +146,7 @@ class AIPersistencePoolError(AIPersistenceError):
 
 
 # ----------------------------------------------------------------------
-# 3. Database / Postgres errors (shared)
+# 4. Database / Postgres errors (shared)
 # ----------------------------------------------------------------------
 class AIDatabaseError(AIAPIError):
     """Errors from PostgreSQL / asyncpg operations."""
@@ -176,10 +167,16 @@ class AIDatabaseQueryError(AIDatabaseError):
 
 
 # ----------------------------------------------------------------------
-# 4. Generic client errors (shared)
+# 5. Generic client errors (shared)
 # ----------------------------------------------------------------------
 class AIClientError(AIAPIError):
-    """Internal errors within any ai_api client (validation, state machine, usage)."""
+    """Internal errors within any ai_api client (validation, state machine, usage).
+
+    Provider-specific client errors (``OllamaClientError``, ``xAIClientError``)
+    inherit from this class (via multiple inheritance) so that a single
+    ``except AIClientError`` clause catches all client-internal failures
+    regardless of provider.
+    """
 
     pass
 
@@ -188,10 +185,11 @@ class AIClientError(AIAPIError):
 # Convenience wrapper functions (used by all providers)
 # ----------------------------------------------------------------------
 def wrap_logger_error(exc: Exception, message: str) -> AILoggerError:
-    """Wrap any exception as an AILoggerError.
+    """Wrap any exception as an ``AILoggerError``.
 
-    The original exception is attached via `__cause__` and its type is
-    recorded in `details["original"]`.
+    The original exception is attached via ``__cause__`` and its type is
+    recorded in ``details["original"]``. This is the canonical pattern used
+    throughout the codebase.
 
     Parameters
     ----------
@@ -211,7 +209,7 @@ def wrap_logger_error(exc: Exception, message: str) -> AILoggerError:
 
 
 def wrap_persistence_error(exc: Exception, message: str) -> AIPersistenceError:
-    """Wrap any exception as an AIPersistenceError.
+    """Wrap any exception as an ``AIPersistenceError``.
 
     Parameters
     ----------
@@ -230,7 +228,7 @@ def wrap_persistence_error(exc: Exception, message: str) -> AIPersistenceError:
 
 
 def wrap_database_error(exc: Exception, message: str) -> AIDatabaseError:
-    """Wrap any exception as an AIDatabaseError.
+    """Wrap any exception as an ``AIDatabaseError``.
 
     Parameters
     ----------
@@ -249,7 +247,7 @@ def wrap_database_error(exc: Exception, message: str) -> AIDatabaseError:
 
 
 def wrap_client_error(exc: Exception, message: str) -> AIClientError:
-    """Wrap any exception as an AIClientError.
+    """Wrap any exception as an ``AIClientError``.
 
     Parameters
     ----------

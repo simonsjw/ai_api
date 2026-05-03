@@ -15,6 +15,17 @@ and/or ``sequence`` via ``**kwargs``, they are forwarded to
 is stored in the ``response`` JSONB column. Full history is reconstructed
 on demand by ``reconstruct_neutral_branch`` (recursive CTE).
 
+Error Handling
+--------------
+- HTTP / transport errors (connection refused, 4xx/5xx, timeouts) are
+  wrapped as ``OllamaAPIError`` (via ``wrap_ollama_api_error``).
+- Client-side structured-output parsing failures are wrapped as
+  ``OllamaClientError``.
+- Persistence failures are non-fatal (logged at WARNING) and wrapped with
+  ``wrap_persistence_error`` for auditability.
+- All raised exceptions inherit from ``AIAPIError`` (directly or indirectly),
+  enabling uniform ``except AIAPIError`` handling at higher layers.
+
 See Also
 --------
 chat_stream_ollama : streaming counterpart (identical persistence path).
@@ -53,10 +64,14 @@ from ...data_structures.ollama_objects import (
     OllamaRequest,
     OllamaResponse,
 )
+from ..common.errors import wrap_persistence_error
+from .errors_ollama import OllamaClientError, wrap_ollama_api_error
+
+__all__: list[str] = ["create_turn_chat_session"]
 
 
 async def create_turn_chat_session(
-    client: Any,                                                                          # BaseOllamaClient or concrete TurnOllamaClient
+    client: Any,
     messages: list[dict[str, Any]],
     model: str = "llama3.2",
     *,
@@ -125,16 +140,15 @@ async def create_turn_chat_session(
 
     Raises
     ------
-    httpx.HTTPStatusError
-        If Ollama returns a non-2xx status (model not found, context length
-        exceeded, …).
-    pydantic.ValidationError
-        If ``response_model`` was supplied and the generated JSON fails
-        schema validation (the raw response is still returned).
-    Exception
-        Any error raised by ``persist_chat_turn`` is logged at WARNING level
-        but does **not** abort the call – persistence failures are
-        non-fatal.
+    OllamaAPIError
+        Any HTTP or transport error from Ollama (connection refused,
+        model not found, context length exceeded, 4xx/5xx responses, etc.).
+        The original ``httpx.HTTPError`` is attached via ``__cause__``.
+    OllamaClientError
+        Failure to parse structured output when ``response_model`` is supplied.
+    AIPersistenceError
+        Failure during the (non-fatal) persistence step (still logged and
+        the response is returned).
 
     See Also
     --------
@@ -200,20 +214,40 @@ async def create_turn_chat_session(
     )
 
     # ------------------------------------------------------------------
-    # 3. Execute the HTTP call to Ollama
+    # 3. Execute the HTTP call to Ollama — wrap transport errors
     # ------------------------------------------------------------------
     http_client = await client._get_http_client()
     payload = request.to_ollama_dict()
     payload["stream"] = False
 
-    resp = await http_client.post("/api/chat", json=payload)
-    resp.raise_for_status()
-    raw_data = resp.json()
-
-    response = OllamaResponse.from_dict(raw_data)
+    try:
+        resp = await http_client.post("/api/chat", json=payload)
+        resp.raise_for_status()
+        raw_data = resp.json()
+        response = OllamaResponse.from_dict(raw_data)
+    except Exception as exc:
+        raise wrap_ollama_api_error(
+            exc, f"Ollama chat request failed for model '{model}'"
+        ) from exc
 
     # ------------------------------------------------------------------
-    # 4. Unified persistence via persist_chat_turn (single call)
+    # 4. Validate structured output if response_model was supplied
+    # ------------------------------------------------------------------
+    if response_model is not None:
+        try:
+            parsed = response_model.model_validate_json(response.text)
+            response.parsed = parsed
+        except Exception as exc:
+            raise OllamaClientError(
+                f"Failed to parse structured response for model '{model}'",
+                details={
+                    "original": type(exc).__name__,
+                    "response_text": response.text[:500],
+                },
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # 5. Unified persistence via persist_chat_turn (single call)
     # ------------------------------------------------------------------
     if save_mode != "none" and client.persistence_manager is not None:
         try:
@@ -222,8 +256,6 @@ async def create_turn_chat_session(
                 provider_request=request,
                 kind="chat",
                 branching=True,
-                # Forward branching metadata (tree/branch/parent/sequence)
-                # Non-branching kwargs were already consumed by OllamaRequest.
                 **{
                     k: v
                     for k, v in kwargs.items()
@@ -234,6 +266,7 @@ async def create_turn_chat_session(
             logger.warning(
                 "Chat turn persistence failed (continuing)", extra={"error": str(exc)}
             )
+            # Non-fatal — response is still returned
 
     logger.info("Turn-based Ollama chat completed", extra={"model": model})
     return response

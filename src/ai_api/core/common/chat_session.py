@@ -24,6 +24,7 @@ from typing import Any
 from ai_api.data_structures.ollama_objects import OllamaRequest, OllamaResponse
 from ai_api.data_structures.xai_objects import xAIRequest, xAIResponse
 
+from .errors import AIClientError, wrap_client_error
 from .persistence import PersistenceManager
 
 __all__: list[str] = ["ChatSession", "create_or_continue_chat", "edit_chat_history"]
@@ -86,7 +87,10 @@ class ChatSession:
             raw = await self.client._call_xai(req)
             resp = xAIResponse.from_sdk(raw)
         else:
-            raise ValueError(f"Unsupported provider: {provider}")
+            raise wrap_client_error(
+                AIClientError(f"Unsupported provider: {provider}"),
+                f"ChatSession received unsupported provider '{provider}'",
+            )
 
         saved = await self.pm.persist_chat_turn(
             provider_response=resp,
@@ -143,9 +147,12 @@ class ChatSession:
             edited_history, operations_applied, etc.).
         """
         if not self.current_tree_id or not self.current_branch_id:
-            raise RuntimeError(
-                "Cannot edit history — no active conversation. "
-                "Call create_or_continue first or pass tree_id/branch_id."
+            raise wrap_client_error(
+                RuntimeError(
+                    "Cannot edit history — no active conversation. "
+                    "Call create_or_continue first or pass tree_id/branch_id."
+                ),
+                "ChatSession has no active conversation for history editing",
             )
 
         result = await self.pm.create_edited_branch(
@@ -187,7 +194,6 @@ async def edit_chat_history(
     Useful when you don't need to maintain state across multiple operations.
     """
     session = ChatSession(client, pm)
-    # If caller passed tree_id/branch_id, set them on the temp session first
     if "tree_id" in kwargs:
         session.current_tree_id = kwargs.pop("tree_id")
     if "branch_id" in kwargs:

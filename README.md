@@ -16,7 +16,7 @@
 - **Symmetrical Persistence** — Save to Postgres (recommended) or JSON files using `PersistenceManager`
 - **Protocol-Driven Design** — Minimal contracts make adding new providers trivial
 - **Rich Error Handling** — Consistent exception hierarchy
-- **Model Management** — Ollama + xAI catalog support
+- **Model Management** — Currently Ollama + xAI catalog support
 
 ---
 

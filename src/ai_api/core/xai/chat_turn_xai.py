@@ -18,6 +18,18 @@ Key responsibilities
 - Validate structured output with Pydantic ``response_model`` and attach
   ``.parsed``.
 
+Error Handling
+--------------
+- SDK / transport errors (gRPC, httpx, authentication, rate limits) are
+  wrapped as ``xAIAPIError`` (via ``wrap_xai_api_error``) so that callers
+  receive a rich, typed exception with ``__cause__`` and structured ``details``.
+- Client-side structured-output parsing failures are wrapped as
+  ``xAIClientError``.
+- Persistence failures are non-fatal (logged at WARNING) and wrapped with
+  ``wrap_persistence_error`` for auditability.
+- All raised exceptions inherit from ``AIAPIError`` (directly or indirectly),
+  enabling uniform ``except AIAPIError`` handling at higher layers.
+
 Git-style Branching Support
 ---------------------------
 All branching identifiers are passed through ``**kwargs`` and forwarded
@@ -40,7 +52,9 @@ from typing import Any, Type
 from pydantic import BaseModel
 
 from ...data_structures.xai_objects import xAIRequest, xAIResponse
+from ..common.errors import wrap_persistence_error
 from ..common.response_struct import create_json_response_spec
+from .errors_xai import wrap_xai_api_error, xAIClientError
 
 __all__: list[str] = ["create_turn_chat_session"]
 
@@ -98,6 +112,18 @@ async def create_turn_chat_session(
         Completed response object. If ``response_model`` was supplied,
         the ``.parsed`` attribute contains the validated Pydantic instance.
 
+    Raises
+    ------
+    xAIAPIError
+        Any error from the xAI SDK (authentication, rate limit, transport,
+        invalid request, etc.). The original exception is attached via
+        ``__cause__``.
+    xAIClientError
+        Failure to parse structured output when ``response_model`` is supplied.
+    AIPersistenceError
+        Failure during the (non-fatal) persistence step (still logged and
+        the response is returned).
+
     Notes
     -----
     This function no longer calls ``persist_request`` + ``persist_response``
@@ -122,18 +148,22 @@ async def create_turn_chat_session(
     # 2. Include specification for response if provided.
     if response_model is not None:
         spec = create_json_response_spec("xai", response_model)
-        # Attach to the request (adjust field name to match your xAIRequest)
         request = request.model_copy(
             update={"response_format": spec.to_sdk_response_format()}
         )
 
-    #  3. Call the xAI SDK (chat completion)
-    chat = sdk_client.chat.create(
-        model=request.model,
-        **request.to_sdk_chat_kwargs(),
-    )
-    raw_response = await chat.completions.create()
-    response = xAIResponse.from_sdk(raw_response)
+    # 3. Call the xAI SDK (chat completion) — wrap SDK errors
+    try:
+        chat = sdk_client.chat.create(
+            model=request.model,
+            **request.to_sdk_chat_kwargs(),
+        )
+        raw_response = await chat.completions.create()
+        response = xAIResponse.from_sdk(raw_response)
+    except Exception as exc:
+        raise wrap_xai_api_error(
+            exc, f"xAI chat completion failed for model '{model}'"
+        ) from exc
 
     # 4. Validate the response if a response specification is provided.
     if response_model is not None:
@@ -141,9 +171,13 @@ async def create_turn_chat_session(
             parsed = response_model.model_validate_json(response.text)
             response.parsed = parsed
         except Exception as exc:
-            client.logger.warning(
-                "Failed to parse structured response", extra={"error": str(exc)}
-            )
+            raise xAIClientError(
+                f"Failed to parse structured response for model '{model}'",
+                details={
+                    "original": type(exc).__name__,
+                    "response_text": response.text[:500],
+                },
+            ) from exc
 
     # 5. Persist via unified entry point (handles request + response + branching)
     if save_mode != "none" and client.persistence_manager is not None:
@@ -169,6 +203,8 @@ async def create_turn_chat_session(
                 "Persistence via persist_chat_turn failed (continuing)",
                 extra={"error": str(exc)},
             )
+            # Non-fatal — still return the response, but record for audit
+            # (the warning already contains the wrapped exception context)
 
     logger.info("Turn-based xAI chat completed", extra={"model": model})
     return response

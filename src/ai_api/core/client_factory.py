@@ -13,6 +13,13 @@ Architectural role
 - Still useful for one-off calls or when you need the raw mode client directly.
 - For branched/editable conversations, use ``ChatSession`` (recommended).
 
+Error handling
+--------------
+The factory raises ``AIClientError`` (via ``wrap_client_error``) for
+unknown providers or unsupported modes. This ensures every exception
+surfaced by the common layer is a rich, typed exception with ``__cause__``
+and structured ``details``, consistent with the rest of ``ai_api.core.common``.
+
 How it uses the rest of the core/ structure
 -------------------------------------------
 - Imports from ``common/persistence.py`` (via the provider clients).
@@ -22,7 +29,7 @@ How it uses the rest of the core/ structure
 - All clients share the same ``PersistenceManager``, ``SaveMode``, and error wrappers.
 
 Example usage
------------------------------------------
+-------------
 .. code-block:: python
 
     from ai_api.core.client_factory import get_llm_client
@@ -65,6 +72,8 @@ ai_api.core.ollama_client, ai_api.core.xai_client
 import logging
 from typing import Any, Literal, Type, TypedDict
 
+from .common.errors import wrap_client_error
+
 __all__: list[str] = [
     "ChatMode",
     "PROVIDER_REGISTRY",
@@ -73,7 +82,7 @@ __all__: list[str] = [
 ]
 
 
-ChatMode: ChatMode = Literal["turn", "stream", "batch", "embed"]
+ChatMode = Literal["turn", "stream", "batch", "embed"]
 
 
 class ProviderModeMap(TypedDict, total=False):
@@ -94,9 +103,9 @@ def register_provider(
     turn_cls: Type,
     stream_cls: Type,
     batch_cls: Type,
-    embed_cls: Type | None = None,                                                        # optional for providers without embeddings
+    embed_cls: Type | None = None,
 ) -> None:
-    """Register the three client classes for a new LLM provider.
+    """Register the three (or four) client classes for a new LLM provider.
 
     Call this once (usually at the bottom of the provider's ``*_client.py`` file)
     after the classes are defined.
@@ -105,8 +114,15 @@ def register_provider(
     ----------
     name : str
         Provider identifier (e.g. "ollama", "xai", "groq").
-    turn_cls, stream_cls, batch_cls, embed_cls : Type
-        The four mode-specific client classes.
+    turn_cls, stream_cls, batch_cls : Type
+        The three mandatory mode-specific client classes.
+    embed_cls : Type or None, optional
+        Optional embeddings client class (some providers do not support embeddings).
+
+    Raises
+    ------
+    ValueError
+        If a provider with the same name is already registered.
     """
     if name in PROVIDER_REGISTRY:
         raise ValueError(f"Provider '{name}' is already registered.")
@@ -146,8 +162,10 @@ def get_llm_client(
 
     Raises
     ------
-    ValueError
+    AIClientError
         Unknown provider or unsupported mode for that provider.
+        The original ``ValueError`` is attached via ``__cause__`` and the
+        provider/mode are recorded in ``details``.
     """
     if provider not in PROVIDER_REGISTRY:
         # Lazy auto-register for built-in providers
@@ -155,22 +173,29 @@ def get_llm_client(
             from . import ollama_client                                                   # noqa: F401 - triggers register_provider
         elif provider == "xai":
             from . import xai_client                                                      # noqa: F401 - triggers register_provider
-        # elif provider == "groq":                                                        # <-- add for every new provider
+        # elif provider == "groq":  # <-- add for every new provider
         #     from . import groq_client
         else:
-            raise ValueError(
+            exc = ValueError(
                 f"Unknown provider '{provider}'. "
                 f"Currently registered: {list(PROVIDER_REGISTRY.keys())}. "
                 "Did you forget to call register_provider(...) or import the provider module?"
             )
+            raise wrap_client_error(
+                exc, f"get_llm_client received unknown provider '{provider}'"
+            ) from exc
 
     mode_map = PROVIDER_REGISTRY[provider]
     ClientClass: Type = mode_map.get(mode)                                                # type: ignore[assignment]
     if ClientClass is None:
-        raise ValueError(
+        exc = ValueError(
             f"Mode '{mode}' is not supported for provider '{provider}'. "
             f"Supported modes: {list(mode_map.keys())}"
         )
+        raise wrap_client_error(
+            exc,
+            f"get_llm_client received unsupported mode '{mode}' for provider '{provider}'",
+        ) from exc
 
     # Instantiate the chosen class. All provider classes accept the same common kwargs
     # (logger, persistence_manager, timeout, ...) plus their own required ones.

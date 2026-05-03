@@ -14,6 +14,18 @@ hard-codes ``branching=False`` (and does not accept or forward
 and avoids polluting the recursive CTE used by
 ``reconstruct_neutral_branch``.
 
+Error Handling
+--------------
+- HTTP / transport errors (connection refused, 4xx/5xx, timeouts) from the
+  ``/api/embeddings`` endpoint are wrapped as ``OllamaAPIError`` (via
+  ``wrap_ollama_api_error``).
+- JSON parsing or response-shape errors are wrapped as
+  ``OllamaClientError``.
+- Persistence failures are non-fatal (logged at WARNING with rich context
+  via ``wrap_persistence_error``) so the caller still receives the embeddings.
+- All raised exceptions inherit from ``AIAPIError`` (directly or indirectly),
+  enabling uniform ``except AIAPIError`` handling at higher layers.
+
 See Also
 --------
 chat_turn_ollama, chat_stream_ollama : conversational paths that do accept
@@ -28,7 +40,13 @@ from __future__ import annotations
 
 from typing import Any, Union
 
+import httpx
+
 from ...data_structures.ollama_objects import OllamaRequest
+from ..common.errors import wrap_client_error, wrap_persistence_error
+from .errors_ollama import wrap_ollama_api_error
+
+__all__: list[str] = ["create_embeddings", "OllamaEmbedResponse"]
 
 
 class OllamaEmbedResponse:
@@ -117,10 +135,10 @@ async def create_embeddings(
 
     Raises
     ------
-    httpx.HTTPStatusError
-        If the embeddings endpoint returns a non-2xx status.
-    Exception
-        Persistence errors are logged at WARNING but do not abort the call.
+    OllamaAPIError
+        If the embeddings endpoint returns a non-2xx status or transport error.
+    OllamaClientError
+        If the response payload is malformed or cannot be parsed.
 
     Examples
     --------
@@ -155,9 +173,19 @@ async def create_embeddings(
         payload["options"] = kwargs.pop("options")
 
     http_client = await client._get_http_client()
-    resp = await http_client.post("/api/embeddings", json=payload)
-    resp.raise_for_status()
-    raw = resp.json()
+
+    try:
+        resp = await http_client.post("/api/embeddings", json=payload)
+        resp.raise_for_status()
+        raw = resp.json()
+    except httpx.HTTPError as exc:
+        raise wrap_ollama_api_error(
+            exc, f"Ollama embeddings request failed for model '{model}'"
+        ) from exc
+    except Exception as exc:
+        raise wrap_client_error(
+            exc, f"Failed to parse embeddings response for model '{model}'"
+        ) from exc
 
     # Ollama returns {"embedding": [...]} for single or {"embeddings": [[...], ...]} for batch
     embeddings = raw.get("embeddings") or raw.get("embedding") or []
@@ -181,8 +209,12 @@ async def create_embeddings(
                 branching=False,
             )
         except Exception as exc:
+            wrapped = wrap_persistence_error(
+                exc, f"Embedding persistence failed for model '{model}' (continuing)"
+            )
             logger.warning(
-                "Embedding persistence failed (continuing)", extra={"error": str(exc)}
+                wrapped.message,
+                extra={"details": wrapped.details, "error": str(exc)},
             )
 
     logger.info("Ollama embeddings completed", extra={"model": model})

@@ -35,6 +35,22 @@ Design goals (numpy/scipy style)
 The schema defined in ``db_responses_schema.py`` (now using py_pgkit.DatabaseBuilder)
 is sufficient; no additional tables or columns are required.
 
+Error handling note
+-------------------
+All database and validation failures are wrapped using the helpers from
+``.errors`` (``wrap_persistence_error``, ``wrap_database_error``, ``wrap_client_error``).
+This ensures every exception that leaves this module is a rich ``AIAPIError``
+subclass with ``__cause__`` and structured ``details``, while adding **zero**
+overhead on the happy path.
+
+See Also
+--------
+reconstruct_neutral_branch : companion method that rebuilds history via
+    recursive CTE on ``parent_response_id``.
+ChatSession : high-level convenience wrapper used by client code.
+py_pgkit docs: shared pools, bulk_insert, query_logs, graceful shutdown.
+
+
 Module level examples
 ---------------------
 All examples assume an async context (or ``asyncio.run(...)``).
@@ -55,13 +71,6 @@ uuid... 0
 
 Streaming chat, branched, embeddings, batch — unchanged API, now benefits from
 shared pools and py_pgkit logging.
-
-See Also
---------
-reconstruct_neutral_branch : companion method that rebuilds history via
-    recursive CTE on ``parent_response_id``.
-ChatSession : high-level convenience wrapper used by client code.
-py_pgkit docs: shared pools, bulk_insert, query_logs, graceful shutdown.
 """
 
 from __future__ import annotations
@@ -73,7 +82,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-import asyncpg                                                                            # kept for legacy db_url fallback only
+import asyncpg
 import py_pgkit as pgk
 from py_pgkit.db import PgSettings, bulk_insert, query_logs
 from py_pgkit.db import get_pool as get_pgk_pool
@@ -83,6 +92,14 @@ from ai_api.data_structures.base_objects import (
     LLMResponseProtocol,
     NeutralResponseBlob,
     NeutralTurn,
+)
+
+# NEW: use the canonical error wrappers so this module participates in the
+# rich, typed error system it was designed for.
+from .errors import (
+    wrap_client_error,
+    wrap_database_error,
+    wrap_persistence_error,
 )
 
 __all__: list[str] = ["PersistenceManager", "persist_batch_requests"]
@@ -136,7 +153,7 @@ class PersistenceManager:
         self.db_url: str | None = db_url
         self.media_root = media_root
         self.json_dir = json_dir or Path("./persisted_requests")
-        self._pool: asyncpg.Pool | None = None                                            # only used in legacy db_url mode
+        self._pool: asyncpg.Pool | None = None
 
     async def _get_pool(self) -> asyncpg.Pool:
         """Lazily get (or create) a connection pool.
@@ -147,10 +164,8 @@ class PersistenceManager:
         the entire application (clients, other modules, etc.).
         """
         if self.settings is not None:
-            # Modern path: shared, lazy, cached by PgPoolManager
             return await get_pgk_pool(self.settings)
 
-        # Legacy fallback (kept for zero-breaking-change migration)
         if self._pool is None and self.db_url:
             self._pool = await asyncpg.create_pool(self.db_url)
         return self._pool                                                                 # type: ignore[return-value]
@@ -172,7 +187,7 @@ class PersistenceManager:
             "provider": provider,
             "model": model,
             "meta": meta,
-            "payload": payload,                                                           # the NeutralResponseBlob
+            "payload": payload,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         file_path.write_text(json.dumps(data, indent=2))
@@ -269,34 +284,9 @@ class PersistenceManager:
 
         Raises
         ------
-        AttributeError
-            If ``provider_response`` does not implement ``to_neutral_format``.
-        asyncpg.exceptions.PostgresError
-            Any database error is propagated (connection loss, constraint
-            violation, …).
-
-        See Also
-        --------
-        reconstruct_neutral_branch : the method that later walks the
-            ``parent_response_id`` links created by this method.
-        ChatSession.create_or_continue : high-level wrapper used by the
-            client factories.
-        pgk.bulk_insert / pgk.query_logs : for high-volume or analytics use cases.
-
-        Notes
-        -----
-        The method is intentionally idempotent with respect to the neutral
-        blob: calling it twice with the same objects produces two rows that
-        differ only in ``tstamp`` and ``response_id``.  This is useful for
-        retry logic after a transient DB failure.
-
-        Examples
-        --------
-        Modern usage with py_pgkit settings + structured logging
-        >>> settings = PgSettings(host="localhost", database="responsesdb", ...)
-        >>> pgk.configure_logging(settings)
-        >>> pm = PersistenceManager(settings=settings)  # logger auto-created
-        >>> meta = await pm.persist_chat_turn(resp, req)
+        AIPersistenceError
+            Any failure during persistence (DB write, JSON handling, validation).
+            The original exception is attached via ``__cause__``.
         """
         # ------------------------------------------------------------------
         # 1. Normalise branching for non-chat interactions
@@ -311,7 +301,6 @@ class PersistenceManager:
             tree_id = uuid.uuid4()
             branch_id = uuid.uuid4()
             sequence = 0
-            # TODO: optionally insert row into Conversations table here (or use py_pgkit helper)
 
         if sequence is None and branching:
             sequence = 1 if parent_response_id else 0
@@ -333,7 +322,14 @@ class PersistenceManager:
         # ------------------------------------------------------------------
         # 3. Convert provider response → neutral turn
         # ------------------------------------------------------------------
-        neutral_resp_dict = provider_response.to_neutral_format(branch_info=branch_info)
+        try:
+            neutral_resp_dict = provider_response.to_neutral_format(
+                branch_info=branch_info
+            )
+        except Exception as exc:
+            raise wrap_persistence_error(
+                exc, "Failed to convert provider response to neutral format"
+            ) from exc
 
         # ------------------------------------------------------------------
         # 4. Build the prompt that produced this response (delta only)
@@ -390,24 +386,35 @@ class PersistenceManager:
             else:
                 endpoint = {}
 
-            await self._insert_response_postgres(
-                tree_id=tree_id,
-                branch_id=branch_id,
-                parent_response_id=parent_response_id,
-                sequence=sequence,
-                response_blob=response_blob,
-                meta=meta,
-                endpoint=endpoint,
-            )
+            try:
+                await self._insert_response_postgres(
+                    tree_id=tree_id,
+                    branch_id=branch_id,
+                    parent_response_id=parent_response_id,
+                    sequence=sequence,
+                    response_blob=response_blob,
+                    meta=meta,
+                    endpoint=endpoint,
+                )
+            except Exception as exc:
+                raise wrap_database_error(
+                    exc, "Failed to insert response into Postgres"
+                ) from exc
+
         elif save_mode == "json_files":
-            await self._persist_response_json(
-                provider_response.endpoint().provider
-                if hasattr(provider_response, "endpoint")
-                else "unknown",
-                meta.get("model", "unknown"),
-                meta,
-                response_blob,
-            )
+            try:
+                await self._persist_response_json(
+                    provider_response.endpoint().provider
+                    if hasattr(provider_response, "endpoint")
+                    else "unknown",
+                    meta.get("model", "unknown"),
+                    meta,
+                    response_blob,
+                )
+            except Exception as exc:
+                raise wrap_persistence_error(
+                    exc, "Failed to write response JSON file"
+                ) from exc
 
         self.logger.info(
             "LLM interaction persisted",
@@ -479,79 +486,80 @@ class PersistenceManager:
             Each element is suitable for passing directly to
             ``OllamaRequest.from_neutral_history`` or the equivalent xAI method.
 
-        See Also
-        --------
-        persist_chat_turn : the method that writes new turns and populates
-            the branching columns that this method later traverses.
-        ChatSession.create_or_continue : high-level wrapper that calls both.
+        Raises
+        ------
+        AIDatabaseError
+            On any Postgres error during the recursive CTE query.
         """
         if not (self.settings or self.db_url):
             return []
 
-        pool = await self._get_pool()
-        async with pool.acquire() as conn:
-            # Recursive CTE that walks forward via parent_response_id links
-            query = """
-                WITH RECURSIVE branch_history AS (
-                    -- Anchor: start from root of branch OR from a specific response
-                    SELECT
-                        response_id,
-                        response,
-                        sequence,
-                        parent_response_id,
-                        0 AS depth
-                    FROM responses
-                    WHERE tree_id = $1
-                      AND branch_id = $2
-                      AND (
-                          parent_response_id IS NULL
-                          OR response_id = COALESCE($3, (
-                              SELECT response_id FROM responses
-                              WHERE tree_id = $1 AND branch_id = $2
-                              ORDER BY sequence ASC LIMIT 1
-                          ))
-                      )
+        try:
+            pool = await self._get_pool()
+            async with pool.acquire() as conn:
+                query = """
+                    WITH RECURSIVE branch_history AS (
+                        SELECT
+                            response_id,
+                            response,
+                            sequence,
+                            parent_response_id,
+                            0 AS depth
+                        FROM responses
+                        WHERE tree_id = $1
+                          AND branch_id = $2
+                          AND (
+                              parent_response_id IS NULL
+                              OR response_id = COALESCE($3, (
+                                  SELECT response_id FROM responses
+                                  WHERE tree_id = $1 AND branch_id = $2
+                                  ORDER BY sequence ASC LIMIT 1
+                              ))
+                          )
 
-                    UNION ALL
+                        UNION ALL
 
-                    -- Recursive step: follow children (rows whose parent_response_id points to us)
-                    SELECT
-                        r.response_id,
-                        r.response,
-                        r.sequence,
-                        r.parent_response_id,
-                        bh.depth + 1
-                    FROM responses r
-                    JOIN branch_history bh ON r.parent_response_id = bh.response_id
-                    WHERE ($4 IS NULL OR bh.depth < $4)
+                        SELECT
+                            r.response_id,
+                            r.response,
+                            r.sequence,
+                            r.parent_response_id,
+                            bh.depth + 1
+                        FROM responses r
+                        JOIN branch_history bh ON r.parent_response_id = bh.response_id
+                        WHERE ($4 IS NULL OR bh.depth < $4)
+                    )
+                    SELECT response, sequence, response_id
+                    FROM branch_history
+                    WHERE ($5 IS NULL OR response_id != $5)
+                    ORDER BY sequence ASC
+                """
+
+                rows = await conn.fetch(
+                    query,
+                    tree_id,
+                    branch_id,
+                    start_from_response_id,
+                    max_depth,
+                    up_to_response_id,
                 )
-                SELECT response, sequence, response_id
-                FROM branch_history
-                WHERE ($5 IS NULL OR response_id != $5)   -- exclude the up_to_response if provided
-                ORDER BY sequence ASC
-            """
 
-            rows = await conn.fetch(
-                query,
-                tree_id,
-                branch_id,
-                start_from_response_id,
-                max_depth,
-                up_to_response_id,
-            )
+            history: list[dict] = []
+            for row in rows:
+                resp = row["response"]
+                if isinstance(resp, str):
+                    resp = json.loads(resp)
+                neutral_turn = (
+                    resp.get("response", resp) if isinstance(resp, dict) else resp
+                )
+                history.append(neutral_turn)
 
-        history: list[dict] = []
-        for row in rows:
-            resp = row["response"]
-            if isinstance(resp, str):
-                resp = json.loads(resp)
-            # Extract the neutral turn (the part we actually want for history)
-            neutral_turn = (
-                resp.get("response", resp) if isinstance(resp, dict) else resp
-            )
-            history.append(neutral_turn)
+            return history
 
-        return history
+        except Exception as exc:
+            raise wrap_database_error(
+                exc, f"Failed to reconstruct branch {branch_id} (tree {tree_id})"
+            ) from exc
 
     # ======================================================================
     # Git-style history editing (rebase) support
@@ -583,15 +591,13 @@ class PersistenceManager:
             The branch to base the edit on.
         edit_ops : list of dict
             Ordered list of edit operations. Supported operations:
-            - {"op": "remove_turns", "indices": [0, 2, 5]}          # 0-based indices in the reconstructed slice
+            - {"op": "remove_turns", "indices": [0, 2, 5]}
             - {"op": "insert_turn_after", "after_index": 3, "turn": NeutralTurn dict or minimal {"role", "content"}}
             - {"op": "replace_turn", "index": 4, "turn": {...}}
-            Future: "reorder", "merge", "summarize_range", etc.
         new_branch_name : str, optional
             Human-readable name stored in Conversations.branch_metadata.
         start_from_response_id : uuid.UUID, optional
             If provided, reconstruction starts from this turn (inclusive).
-            Useful for "edit only the last N turns".
         end_at_response_id : uuid.UUID, optional
             If provided, reconstruction stops before this turn.
 
@@ -600,47 +606,58 @@ class PersistenceManager:
         dict
             {
                 "new_branch_id": uuid.UUID,
-                "new_response_ids": list[uuid.UUID],   # in order
-                "edited_history": list[dict],          # the final NeutralTurn list
+                "new_response_ids": list[uuid.UUID],
+                "edited_history": list[dict],
                 "operations_applied": list[dict],
                 "conversation_id": uuid.UUID | None,
             }
 
         Raises
         ------
-        ValueError
-            If edit_ops would produce an empty history or invalid indices.
-        asyncpg.exceptions.PostgresError
+        AIClientError
+            If edit_ops would produce an empty history or invalid indices
+            (client-side validation error).
+        AIDatabaseError
             On any database error during the new branch creation.
         """
         if not self.db_url:
-            raise RuntimeError("create_edited_branch requires a Postgres connection")
+            raise wrap_client_error(
+                RuntimeError("create_edited_branch requires a Postgres connection"),
+                "Cannot create edited branch without database connection",
+            )
 
-        # 1. Reconstruct the source history slice (using existing robust helper)
-        history: list[dict] = await self.reconstruct_neutral_branch(
-            tree_id=tree_id,
-            branch_id=source_branch_id,
-            start_from_response_id=start_from_response_id,
-            up_to_response_id=end_at_response_id,
-            max_depth=max_depth or 1000,
-        )
+        try:
+            history: list[dict] = await self.reconstruct_neutral_branch(
+                tree_id=tree_id,
+                branch_id=source_branch_id,
+                start_from_response_id=start_from_response_id,
+                up_to_response_id=end_at_response_id,
+                max_depth=max_depth or 1000,
+            )
+        except Exception as exc:
+            raise wrap_persistence_error(
+                exc, "Failed to load source branch for editing"
+            ) from exc
 
         if not history:
-            raise ValueError("Source branch slice is empty; nothing to edit")
+            raise wrap_client_error(
+                ValueError("Source branch slice is empty; nothing to edit"),
+                "Cannot edit empty conversation history",
+            )
 
-        # 2. Apply the edit operations (pure in-memory transformation)
         edited_history, applied_ops = self._apply_edit_operations(history, edit_ops)
 
         if not edited_history:
-            raise ValueError("Edit operations resulted in empty history")
+            raise wrap_client_error(
+                ValueError("Edit operations resulted in empty history"),
+                "Edit operations produced an empty conversation",
+            )
 
-        # 3. Create new branch + persist every turn as new immutable rows
         new_branch_id = uuid.uuid4()
         new_response_ids: list[uuid.UUID] = []
         new_parent_id: uuid.UUID | None = None
 
         for seq, neutral_turn in enumerate(edited_history):
-            # Build minimal branch context for this new turn
             branch_info = {
                 "tree_id": str(tree_id),
                 "branch_id": str(new_branch_id),
@@ -648,7 +665,6 @@ class PersistenceManager:
                 "sequence": seq,
             }
 
-            # Convert neutral turn back into a response_blob (delta style)
             response_blob = {
                 "prompt": {
                     "system": self._extract_last_system(edited_history[: seq + 1]),
@@ -662,32 +678,41 @@ class PersistenceManager:
                 "branch_context": branch_info,
             }
 
-            # Persist as new row (reuses existing insert path)
-            new_response_id = await self._persist_edited_turn(
-                tree_id=tree_id,
-                branch_id=new_branch_id,
-                parent_response_id=new_parent_id,
-                sequence=seq,
-                response_blob=response_blob,
-                meta={
-                    "kind": "edited",
-                    "edit_source_branch_id": str(source_branch_id),
-                    "edit_operations": applied_ops if seq == 0 else None,
-                    "original_turn_index": history.index(neutral_turn)
-                    if neutral_turn in history
-                    else None,
-                },
-                endpoint={},                                                              # TODO: carry endpoint from original turn if needed
-            )
+            try:
+                new_response_id = await self._persist_edited_turn(
+                    tree_id=tree_id,
+                    branch_id=new_branch_id,
+                    parent_response_id=new_parent_id,
+                    sequence=seq,
+                    response_blob=response_blob,
+                    meta={
+                        "kind": "edited",
+                        "edit_source_branch_id": str(source_branch_id),
+                        "edit_operations": applied_ops if seq == 0 else None,
+                        "original_turn_index": history.index(neutral_turn)
+                        if neutral_turn in history
+                        else None,
+                    },
+                    endpoint={},
+                )
+            except Exception as exc:
+                raise wrap_database_error(
+                    exc, f"Failed to persist edited turn {seq} of new branch"
+                ) from exc
+
             new_response_ids.append(new_response_id)
             new_parent_id = new_response_id
 
-        # 4. Ensure Conversations row exists and point it at the new branch (optional UX win)
-        conversation_id = await self._ensure_conversation_and_set_active_branch(
-            tree_id=tree_id,
-            active_branch_id=new_branch_id,
-            branch_name=new_branch_name or f"edited-{new_branch_id.hex[:8]}",
-        )
+        try:
+            conversation_id = await self._ensure_conversation_and_set_active_branch(
+                tree_id=tree_id,
+                active_branch_id=new_branch_id,
+                branch_name=new_branch_name or f"edited-{new_branch_id.hex[:8]}",
+            )
+        except Exception as exc:
+            raise wrap_persistence_error(
+                exc, "Failed to update conversation metadata after rebase"
+            ) from exc
 
         self.logger.info(
             "Created edited branch via rebase",
@@ -744,7 +769,7 @@ class PersistenceManager:
                 if isinstance(new_turn, dict) and "role" in new_turn:
                     if 0 <= after_idx < len(result):
                         result.insert(after_idx + 1, new_turn)
-                    elif after_idx == -1:                                                 # special case: insert at beginning
+                    elif after_idx == -1:
                         result.insert(0, new_turn)
                     applied.append(
                         {
@@ -759,10 +784,7 @@ class PersistenceManager:
                 new_turn = op.get("turn", {})
                 if 0 <= idx < len(result) and isinstance(new_turn, dict):
                     old = result[idx]
-                    result[idx] = {
-                        **old,
-                        **new_turn,
-                    }                                                                     # shallow merge so role/content/etc. can be overridden
+                    result[idx] = {**old, **new_turn}
                     applied.append(
                         {
                             "op": "replace_turn",
@@ -794,62 +816,39 @@ class PersistenceManager:
         Creates a brand-new immutable row with a fresh ``response_id``.
         Called by ``create_edited_branch`` for every turn in the edited
         history. The original branch remains untouched.
-
-        Parameters
-        ----------
-        tree_id : uuid.UUID
-            The conversation tree (unchanged across rebase).
-        branch_id : uuid.UUID
-            The *new* branch identifier created for the edited history.
-        parent_response_id : uuid.UUID or None
-            Previous turn in the *new* branch (None for the first turn).
-        sequence : int
-            Position of this turn within the new branch.
-        response_blob : dict
-            Neutral blob (prompt + response) for the edited turn.
-        meta : dict
-            Metadata including ``edit_source_branch_id`` and
-            ``edit_operations`` for auditability.
-        endpoint : dict
-            Provider endpoint (copied from the original turn).
-
-        Returns
-        -------
-        uuid.UUID
-            The newly generated ``response_id`` for this turn.
-
-        Raises
-        ------
-        asyncpg.exceptions.PostgresError
-            Propagated on any database failure.
         """
         pool = await self._get_pool()
         new_response_id = uuid.uuid4()
 
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO responses (
-                    tstamp, provider_id, endpoint, request_id, request_tstamp,
-                    response_id, response, meta,
-                    tree_id, branch_id, parent_response_id, sequence
-                ) VALUES (
-                    NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO responses (
+                        tstamp, provider_id, endpoint, request_id, request_tstamp,
+                        response_id, response, meta,
+                        tree_id, branch_id, parent_response_id, sequence
+                    ) VALUES (
+                        NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+                    )
+                    """,
+                    1,
+                    json.dumps(endpoint),
+                    uuid.uuid4(),
+                    datetime.now(timezone.utc).isoformat(),
+                    new_response_id,
+                    json.dumps(response_blob),
+                    json.dumps(meta),
+                    tree_id,
+                    branch_id,
+                    parent_response_id,
+                    sequence,
                 )
-                """,
-                1,                                                                        # TODO: proper provider_id lookup
-                json.dumps(endpoint),
-                uuid.uuid4(),                                                             # request_id (placeholder for edited turns)
-                datetime.now(timezone.utc).isoformat(),
-                new_response_id,
-                json.dumps(response_blob),
-                json.dumps(meta),
-                tree_id,
-                branch_id,
-                parent_response_id,
-                sequence,
-            )
-        return new_response_id
+            return new_response_id
+        except Exception as exc:
+            raise wrap_database_error(
+                exc, f"Failed to insert edited turn {sequence}"
+            ) from exc
 
     async def _ensure_conversation_and_set_active_branch(
         self,
@@ -857,35 +856,9 @@ class PersistenceManager:
         active_branch_id: uuid.UUID,
         branch_name: str,
     ) -> uuid.UUID | None:
-        """Ensure a ``Conversations`` row exists and point it at the active branch.
-
-        Creates the row on first use and updates ``active_branch_id`` plus
-        ``branch_metadata`` (human-readable branch names) on every rebase.
-        This enables UI layers to list “current branch” without scanning
-        the large partitioned ``responses`` table.
-
-        Parameters
-        ----------
-        tree_id : uuid.UUID
-            The conversation tree.
-        active_branch_id : uuid.UUID
-            The branch that should become the default for new turns.
-        branch_name : str
-            Human-readable name stored under ``branch_metadata[branch_name]``.
-
-        Returns
-        -------
-        uuid.UUID or None
-            The ``conversation_id`` (newly created or existing).
-
-        Raises
-        ------
-        asyncpg.exceptions.PostgresError
-            On any database error during insert/update.
-        """
+        """Ensure a ``Conversations`` row exists and point it at the active branch."""
         pool = await self._get_pool()
         async with pool.acquire() as conn:
-            # Try to find existing conversation for this tree
             row = await conn.fetchrow(
                 "SELECT conversation_id FROM conversations WHERE tree_id = $1 LIMIT 1",
                 tree_id,
@@ -912,7 +885,6 @@ class PersistenceManager:
                 )
                 return conv_id
             else:
-                # Create new conversation row
                 new_conv_id = uuid.uuid4()
                 await conn.execute(
                     """
@@ -938,23 +910,13 @@ class PersistenceManager:
     # High-volume bulk insert helper
     # ------------------------------------------------------------------
     async def bulk_persist_responses(self, records: list[dict[str, Any]]) -> None:
-        """High-performance bulk insert of pre-built response rows via COPY.
-
-        Use this when you have many responses ready (e.g. after a large batch
-        job) instead of looping ``persist_chat_turn``.  Records must match the
-        ``responses`` table columns (or a subset that has defaults).
-
-        Example
-        -------
-        >>> records = [
-        ...     {"endpoint": {...}, "response": {...}, "meta": {...}, ...},
-        ...     ...
-        ... ]
-        >>> await pm.bulk_persist_responses(records)
-        """
+        """High-performance bulk insert of pre-built response rows via COPY."""
         if not self.settings:
-            raise RuntimeError(
-                "bulk_persist_responses requires settings=PgSettings (no db_url fallback)"
+            raise wrap_client_error(
+                RuntimeError(
+                    "bulk_persist_responses requires settings=PgSettings (no db_url fallback)"
+                ),
+                "Bulk persistence requires modern py_pgkit settings",
             )
         await bulk_insert("responses", records, self.settings)
 
@@ -971,55 +933,15 @@ class PersistenceManager:
         order_by: str = "tstamp DESC",
         **extra_filters: Any,
     ) -> list[dict[str, Any]]:
-        """Query the structured `logs` table using py_pgkit's convenient helper.
-
-        Replaces any raw SQL against the `logs` table (tstamp, loglvl, logger,
-        message, obj JSONB) that was previously written by hand.
-
-        This is a thin, user-friendly wrapper around the real
-        `py_pgkit.db.query_logs` (see source for exact implementation).
-
-        Parameters
-        ----------
-        level : str, optional
-            Filter by log level (e.g. "INFO", "ERROR"). Case-insensitive (uppercased internally).
-        logger_name : str, optional
-            Filter by logger name (supports SQL LIKE with wildcards, e.g. "ai_api.%").
-        start_time, end_time : str | datetime | None, optional
-            Time range filter on the `tstamp` column. Accepts ISO strings or
-            datetime objects (converted to ISO for the query). The underlying
-            helper uses `start_time` / `end_time`.
-        limit : int, default 100
-            Maximum rows to return.
-        order_by : str, default "tstamp DESC"
-            ORDER BY clause (passed through).
-        **extra_filters
-            Passed through (currently no extra kwargs are supported by the
-            underlying implementation, but kept for forward compatibility).
-
-        Returns
-        -------
-        list of dict
-            Each row as ``{"idx": int, "tstamp": datetime, "loglvl": str,
-            "logger": str, "message": str, "obj": dict | None}``.
-
-        Example
-        -------
-        >>> recent_errors = await pm.query_logs(level="ERROR", limit=20)
-        >>> for log in recent_errors:
-        ...     print(log["tstamp"], log["message"], log.get("obj"))
-
-        See Also
-        --------
-        pgk.query_logs : the underlying py_pgkit helper (also usable standalone).
-        pgk.logging : the DB-backed logger that populates this table.
-        """
+        """Query the structured `logs` table using py_pgkit's convenient helper."""
         if not self.settings:
-            raise RuntimeError(
-                "query_logs requires settings=PgSettings (no db_url fallback)"
+            raise wrap_client_error(
+                RuntimeError(
+                    "query_logs requires settings=PgSettings (no db_url fallback)"
+                ),
+                "Log querying requires modern py_pgkit settings",
             )
 
-        # Normalise datetime objects to ISO strings (the underlying query expects str)
         def _to_iso(val):
             if val is None:
                 return None
@@ -1041,12 +963,6 @@ class PersistenceManager:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
-    # Low-level INSERT (matches db_responses_schema.py exactly)
-    # Uses py_pgkit pool when settings provided;
-    # still supports bulk_insert path
-    # ------------------------------------------------------------------
     async def _insert_response_postgres(
         self,
         tree_id: uuid.UUID | None,
@@ -1059,52 +975,7 @@ class PersistenceManager:
         request_id: uuid.UUID | None = None,
         request_tstamp: datetime | None = None,
     ) -> None:
-        """Insert a row into the ``responses`` table (partitioned, branched).
-
-        This is the lowest-level persistence primitive. All higher-level
-        methods (``persist_chat_turn``, ``create_edited_branch``) ultimately
-        call this (or its JSON equivalent) after constructing the neutral
-        blob and metadata.
-
-        Parameters
-        ----------
-        tree_id : uuid.UUID or None
-            Conversation tree identifier (None for non-branched interactions).
-        branch_id : uuid.UUID or None
-            Branch within the tree (None for non-branched interactions).
-        parent_response_id : uuid.UUID or None
-            Previous response this turn continues from (enables branching).
-        sequence : int or None
-            Monotonic sequence number within the branch.
-        response_blob : dict
-            The ``NeutralResponseBlob`` (prompt + response + branch_context)
-            serialised to JSONB.
-        meta : dict
-            Merged request/response metadata plus ``kind``, ``provider``,
-            ``model``, etc.
-        endpoint : dict
-            Provider endpoint information (provider, model, base_url, …).
-        request_id : uuid.UUID, optional
-            Stable request identifier (generated if omitted).
-        request_tstamp : datetime, optional
-            Timestamp of the original request (defaults to now).
-
-        Returns
-        -------
-        None
-
-        Raises
-        ------
-        asyncpg.exceptions.PostgresError
-            Any database error (connection loss, constraint violation, …)
-            is propagated to the caller.
-
-        Notes
-        -----
-        The SQL statement is deliberately kept identical to the one
-        generated by ``db_responses_schema.py`` so that schema changes
-        only require updating the prepared statement here.
-        """
+        """Insert a row into the ``responses`` table (partitioned, branched)."""
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             await conn.execute(
@@ -1117,11 +988,11 @@ class PersistenceManager:
                     NOW(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
                 )
                 """,
-                1,                                                                        # TODO: resolve real provider_id from Providers table (lookup cache)
+                1,
                 json.dumps(endpoint),
                 request_id or uuid.uuid4(),
                 request_tstamp or datetime.now(timezone.utc).isoformat(),
-                uuid.uuid4(),                                                             # new response_id
+                uuid.uuid4(),
                 json.dumps(response_blob),
                 json.dumps(meta),
                 tree_id,
@@ -1164,9 +1035,6 @@ async def persist_batch_requests(
     ``persist_chat_turn``).  This helper therefore only logs a warning and
     returns placeholder identifiers so that existing call sites continue
     to work until they are migrated.
-
-    If you have many responses ready, prefer ``manager.bulk_persist_responses(...)``
-    with py_pgkit's COPY-based bulk loader.
     """
     manager.logger.warning(
         "persist_batch_requests is a legacy shim; "

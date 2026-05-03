@@ -1,7 +1,7 @@
 """
 xAI Batch Chat Processing with Flexible Structured Output
 
-This module implements native batch processing for xAI (unlike Ollama-
+This module implements native batch processing for xAI (unlike Ollama,
 which has no native batch endpoint). It is the backend for
 ``BatchXAIClient.create_chat`` and is designed to be called from
 ``ChatSession`` when ``mode="batch"``.
@@ -18,6 +18,17 @@ Features
 - Branching metadata can be supplied per-item via ``**kwargs`` (rare for
   batch but supported for advanced ``ChatSession`` workflows).
 
+Error Handling
+--------------
+- Mismatched ``response_model`` list length raises ``xAIClientError``
+  (via ``wrap_xai_client_error``) for clear client-side validation.
+- Structured-output spec creation errors are wrapped as ``xAIClientError``.
+- Per-item errors from ``create_turn_chat_session`` (``xAIAPIError``,
+  ``xAIClientError``, etc.) propagate naturally — the batch fails fast on
+  the first failing item (consistent with most batch semantics).
+- All raised exceptions inherit from ``AIAPIError`` (directly or indirectly),
+  enabling uniform ``except AIAPIError`` handling at higher layers.
+
 See Also
 --------
 ai_api.core.xai_client.BatchXAIClient
@@ -31,6 +42,7 @@ from typing import Any, Type
 from pydantic import BaseModel
 
 from ...data_structures.xai_objects import xAIRequest
+from ..common.errors import wrap_client_error
 from ..common.response_struct import create_json_response_spec
 
 __all__: list[str] = ["create_batch_chat"]
@@ -85,9 +97,12 @@ async def create_batch_chat(
 
     Raises
     ------
-    ValueError
+    xAIClientError
         If ``response_model`` is a list and its length does not equal
-        ``len(messages_list)``.
+        ``len(messages_list)``, or if structured-output spec creation fails.
+    xAIAPIError
+        Any per-item transport, authentication, or model error from the
+        underlying ``create_turn_chat_session`` call (propagates immediately).
     """
 
     logger = client.logger
@@ -96,10 +111,14 @@ async def create_batch_chat(
     # === VALIDATION: if list, must match batch size ===
     if isinstance(response_model, list):
         if len(response_model) != len(messages_list):
-            raise ValueError(
+            exc = ValueError(
                 f"response_model list length ({len(response_model)}) "
                 f"must equal number of batch requests ({len(messages_list)})"
             )
+            raise wrap_client_error(
+                exc,
+                "response_model list length mismatch in xAI batch request",
+            ) from exc
 
     results = []
 
@@ -122,10 +141,16 @@ async def create_batch_chat(
 
         # Apply structured output spec if needed
         if current_rm is not None:
-            spec = create_json_response_spec("xai", current_rm)
-            request = request.model_copy(
-                update={"response_format": spec.to_sdk_response_format()}
-            )
+            try:
+                spec = create_json_response_spec("xai", current_rm)
+                request = request.model_copy(
+                    update={"response_format": spec.to_sdk_response_format()}
+                )
+            except Exception as exc:
+                raise wrap_client_error(
+                    exc,
+                    f"Failed to build structured-output spec for batch item {idx}",
+                ) from exc
 
         # Reuse the turn-based logic (keeps code DRY)
         from .chat_turn_xai import create_turn_chat_session

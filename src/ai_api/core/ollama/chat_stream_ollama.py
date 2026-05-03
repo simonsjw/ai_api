@@ -17,6 +17,20 @@ Branching support
 - The design guarantees exactly-once persistence even if the stream is
   cancelled or errors (best-effort partial persistence on failure).
 
+Error Handling
+--------------
+- HTTP / transport errors (connection refused, 4xx/5xx, timeouts, streaming
+  protocol violations) are wrapped as ``OllamaAPIError`` (via
+  ``wrap_ollama_api_error``).
+- JSON parsing or chunk-processing errors are wrapped as
+  ``OllamaClientError``.
+- Final persistence failures are non-fatal (logged at WARNING with rich
+  context via ``wrap_persistence_error``) so the user still receives tokens.
+- GPU / memory pressure errors from the local Ollama server are wrapped as
+  ``OllamaGPUMemoryWarning`` when detectable.
+- All raised exceptions inherit from ``AIAPIError`` (directly or indirectly),
+  enabling uniform ``except AIAPIError`` handling at higher layers.
+
 See Also
 --------
 chat_turn_ollama : non-streaming counterpart (identical persistence path).
@@ -42,7 +56,15 @@ from ...data_structures.ollama_objects import (
     OllamaResponse,
     OllamaStreamingChunk,
 )
+from ..common.errors import wrap_client_error, wrap_persistence_error
 from ..common.persistence import PersistenceManager
+from .errors_ollama import (
+    wrap_ollama_api_error,
+    wrap_ollama_error,
+    wrap_ollama_gpu_mem_error,
+)
+
+__all__: list[str] = ["generate_stream_and_persist"]
 
 
 async def generate_stream_and_persist(
@@ -88,11 +110,10 @@ async def generate_stream_and_persist(
 
     Raises
     ------
-    httpx.HTTPStatusError
-        Propagated from the streaming POST if Ollama returns an error.
-    Exception
-        Any persistence error is logged at WARNING but does not abort the
-        stream.
+    OllamaAPIError
+        Any HTTP / transport error during streaming (wrapped with full context).
+    OllamaClientError
+        Chunk processing or JSON parsing failure (non-fatal in some paths).
 
     Examples
     --------
@@ -124,7 +145,12 @@ async def generate_stream_and_persist(
             async for line in resp.aiter_lines():
                 if not line.strip():
                     continue
-                chunk_data = json.loads(line)
+                try:
+                    chunk_data = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise wrap_client_error(
+                        exc, "Failed to parse streaming JSON line from Ollama"
+                    ) from exc
 
                 # Merge incremental content
                 if "message" in chunk_data and "content" in chunk_data["message"]:
@@ -162,9 +188,12 @@ async def generate_stream_and_persist(
                     **kwargs,                                                             # tree/branch/parent/sequence
                 )
             except Exception as exc:
+                wrapped = wrap_persistence_error(
+                    exc, "Final streaming persistence failed for Ollama (continuing)"
+                )
                 logger.warning(
-                    "Streaming final-response persistence failed",
-                    extra={"error": str(exc)},
+                    wrapped.message,
+                    extra={"details": wrapped.details, "error": str(exc)},
                 )
 
         # Emit one final synthetic chunk so callers know the stream ended
@@ -176,8 +205,14 @@ async def generate_stream_and_persist(
             raw=accumulated,
         )
 
-    except Exception:
-        # Best-effort persistence of whatever we have so far
+    except httpx.HTTPError as exc:
+        # Transport-level errors (connection, timeout, 4xx/5xx, etc.)
+        raise wrap_ollama_api_error(
+            exc, f"Ollama streaming request failed for model '{request.model}'"
+        ) from exc
+
+    except Exception as exc:
+        # Best-effort persistence of whatever we have so far on unexpected errors
         if (
             save_mode != "none"
             and persistence_manager is not None
@@ -194,4 +229,7 @@ async def generate_stream_and_persist(
                 )
             except Exception:
                 pass
-        raise
+        # Re-raise as a properly typed error so callers can handle uniformly
+        raise wrap_ollama_error(
+            exc, f"Unexpected error during Ollama streaming for model '{request.model}'"
+        ) from exc
