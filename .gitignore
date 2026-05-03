@@ -1,0 +1,26 @@
+# Environment
+.env
+.env.local
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.mypy_cache/
+
+# PyTest
+.pytest_cache/
+tests/test_logs/
+tests/logs/
+# Editor / personal files
+.dir-locals.el
+.aspell.en.pws
+
+# Build artifacts
+dist/
+build/
+
+# Project storage
+.old/

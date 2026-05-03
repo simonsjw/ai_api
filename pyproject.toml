@@ -1,0 +1,211 @@
+[project]
+name = "ai_api"
+version = "0.9"
+authors = [{ name = "Simon Watson", email = "simon_watson_sjw@hotmail.com" }]
+maintainers = [
+  { name = "Simon Watson", email = "simon_watson_sjw@hotmail.com" },
+]
+description = "Unified async clients for Grok (xAI) and Ollama LLMs with batching, streaming, and PostgreSQL persistence"
+keywords = ["LLM", "Grok", "Ollama", "async", "postgres", "streaming"]
+license = { text = "MIT License" }
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["pydantic>=2.0", "python-dotenv", "asyncpg", "py-pgkit"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Topic :: LLM API",
+]
+
+[project.optional-dependencies] # Optional dependency groups
+dev = [
+  "ruff",
+  "pyrefly",
+  "basedpyright",
+  "pytest",
+  "pytest-asyncio>=0.23.0",
+  "aioresponses>=0.7.6",
+  "pytest-mock>=3.14.0",
+]
+[tool.pytest.ini_options]
+markers = [
+    "live: marks tests that hit real APIs (slow, costs money — Grok is remote, Ollama is local)",
+    "integration: mark test as slow integration test",
+]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"   
+asyncio_default_test_loop_scope = "session"
+
+[build-system] # Build system configuration
+requires = ["setuptools>=61.0"]         # Requirements for building the package
+build-backend = "setuptools.build_meta" # Backend used for building
+
+[tool.setuptools.packages.find] # Configuration for finding packages
+where = ["src"] # Directories to search for packages
+
+[tool.pyrefly] # Pyrefly tool configuration section
+# pyrefly settings 
+# ----------------
+python-version = "3.12"   # Python version for type checking
+python-platform = "linux" # Target platform
+# Optional: Limit scanning to src (helps with import resolution) 
+project-includes = ["src/**/*.py"] # Files to include in type checking
+search-path = ["src"]              # Additional search paths for modules
+
+[errors] # Error kinds to enable/disable in Pyrefly
+abstract-method-call = true                  # Enables check for calling abstract methods: Calling an abstract method. [BasedPyright equivalent: reportAbstractUsage]
+annotation-mismatch = true                   # Checks for annotation mismatches. [BasedPyright equivalent: no direct]  
+assert-type = true                           # Checks assert_type failures (Failed typing.assert_type()). [BasedPyright equivalent: reportAssertTypeFailure]
+bad-argument-count = true                    # Checks argument count. [BasedPyright equivalent: reportCallIssue]
+bad-argument-type = true                     # Checks argument types. [BasedPyright equivalent: reportArgumentType]
+bad-assignment = true                        # Checks assignment compatibility. (Incompatible assignment or Final violation). [BasedPyright equivalent: reportAssignmentType]
+bad-class-definition = true                  # Checks class definition issues. (Issue with class def - e.g., duplicate enum fields). [BasedPyright equivalent: no direct]
+bad-context-manager = true                   # Checks context managers. [BasedPyright equivalent: reportOptionalContextManager]
+bad-function-definition = true               # Checks function definitions. (General function def issue). [BasedPyright equivalent: reportFunctionMemberAccess]
+bad-index = true                             # Checks indexing. (Invalid container index). [BasedPyright equivalent: reportIndexIssue]
+bad-instantiation = true                     # Checks instantiation (Instantiating non-instantiable - e.g., Protocol). [BasedPyright equivalent: reportAbstractUsage]
+bad-keyword-argument = true                  # Checks keyword arguments. (Duplicate kwarg). [BasedPyright equivalent: reportCallIssue]
+bad-match = true                             # Checks match statements. (Invalid match statement). [BasedPyright equivalent: no direct]
+bad-override = true                          # Checks method overrides. (LSP violation in override). [BasedPyright equivalent: reportIncompatibleMethodOverride]
+bad-param-name-override = true               # Checks parameter name changes in subclasses. (Changed param name in subclass). [BasedPyright equivalent: no direct]
+bad-raise = true                             # Checks raise statements. (Invalid raise from.) [BasedPyright equivalent: N/A]
+bad-return = true                            # Checks return types. (Incompatible return type). [BasedPyright equivalent: reportReturnType]
+bad-specialization = true                    # Checks generic specializations. (Wrong generic specialization). [BasedPyright equivalent: reportInvalidTypeArguments]
+bad-typed-dict = true                        # Checks TypedDict usage. (Unsupported TypedDict kwarg). [BasedPyright equivalent: reportTypedDictNotRequiredAccess]
+bad-typed-dict-key = true                    # Checks TypedDict keys. (Invalid TypedDict key). [BasedPyright equivalent: no direct]
+bad-unpacking = true                         # Checks unpacking. (Wrong unpack count). [BasedPyright equivalent: no direct]
+deprecated = true                            # Checks for deprecated usage. Using deprecated item. [BasedPyright equivalent: reportDeprecated]
+implicit-abstract-class = true               # Checks implicit abstract classes. Abstract members without ABC.[BasedPyright equivalent: no direct]
+implicit-any = true                          # Checks for implicit Any types. (Inferred Any). [BasedPyright equivalent: reportImplicitAny]
+implicit-import = true                       # Checks implicit imports. (Relied on external import). [BasedPyright equivalent: no direct]
+implicitly-defined-attribute = true          # Checks conditional attributes. (Attribute defined conditionally). [BasedPyright equivalent: no direct]
+inconsistent-inheritance = true              # Checks inheritance consistency. (Inconsistent base fields). [BasedPyright equivalent: reportInconsistentConstructor]
+inconsistent-overload = true                 # Checks overload consistency. (Overload mismatch with impl). [BasedPyright equivalent: reportInconsistentOverload]
+internal-error = true                        # Reports internal errors. (Pyrefly bug). [BasedPyright equivalent: no direct]
+invalid-annotation = true                    # Checks annotations (Misused special form). [BasedPyright equivalent: reportInvalidTypeForm]
+invalid-argument = true                      # Checks typing arguments. (Invalid typing func arg). [BasedPyright equivalent: reportInvalidTypeArguments]
+invalid-decorator = true                     # Checks decorators. (Wrong decorator use). [BasedPyright equivalent: reportUntypedFunctionDecorator or reportUntypedClassDecorator]
+invalid-inheritance = true                   # Checks inheritance. (Invalid subclassing). [BasedPyright equivalent: reportIncompatibleVariableOverride]
+invalid-literal = true                       # Checks literals. (Illegal Literal). [BasedPyright equivalent: no direct]
+invalid-overload = true                      # Checks overloads. (No base for @overload). [BasedPyright equivalent: reportNoOverloadImplementation]
+invalid-param-spec = true                    # Checks ParamSpec. (Misused ParamSpec). [BasedPyright equivalent: no direct]
+invalid-self-type = true                     # Checks self types. (Self in wrong context). [BasedPyright equivalent: no direct]
+invalid-super-call = true                    # Checks super calls. (Wrong super()). [BasedPyright equivalent: reportMissingSuperCall]
+invalid-syntax = true                        # Checks syntax issues. (Syntax edge case). [BasedPyright equivalent: reportInvalidStringEscapeSequence]
+invalid-type-alias = true                    # Checks type aliases. (Illegal TypeAlias). [BasedPyright equivalent: reportInvalidTypeForm]
+invalid-type-var = true                      # Checks TypeVar. (Wrong TypeVar). [BasedPyright equivalent: reportInvalidTypeVarUse]
+invalid-type-var-tuple = true                # Checks TypeVarTuple. (Misused TypeVarTuple). [BasedPyright equivalent: no direct]
+invalid-yield = true                         # Checks yields. (Wrong yield). [BasedPyright equivalent: no direct]
+missing-argument = true                      # Checks missing arguments. (Missing required arg). [BasedPyright equivalent: reportMissingParameterType]
+missing-attribute = true                     # Checks missing attributes. (Non-existent attr). [BasedPyright equivalent: reportAttributeAccessIssue]
+missing-import = true                        # Checks missing imports. (Module not found). [BasedPyright equivalent: reportMissingImports]
+missing-module-attribute = true              # Checks module attributes. (Non-existent from-import). [BasedPyright equivalent: reportMissingModuleSource]
+missing-source = true                        # Checks missing sources. (Stubs without source). [BasedPyright equivalent: reportMissingTypeStubs]
+missing-source-for-stubs = true              # Checks stubs sources. (Bundled stubs without source). [BasedPyright equivalent: reportMissingTypeStubs]
+no-access = true                             # Checks access. (Inaccessible attr). [BasedPyright equivalent: reportPrivateUsage]
+no-matching-overload = true                  # Checks overload matches. (No overload match). [BasedPyright equivalent: reportOverlappingOverload]
+not-a-type = true                            # Checks type usage. (Non-type as type). [BasedPyright equivalent: reportNotAType]
+not-async = true                             # Checks async. (Await on non-awaitable). [BasedPyright equivalent: no direct]
+not-callable = true                          # Checks callables. (Calling non-function). [BasedPyright equivalent: reportOptionalCall]
+not-iterable = true                          # Checks iterables. (Iterating non-iterable). [BasedPyright equivalent: reportOptionalIterable]
+open-unpacking = true                        # Checks unpacking TypedDict. (Unpacking open TypedDict). [BasedPyright equivalent: no direct]
+parse-error = true                           # Checks parsing. (Parse/syntax issue). [BasedPyright equivalent: no direct]
+protocol-implicitly-defined-attribute = true # Checks protocol attributes. (Protocol attr via assignment). [BasedPyright equivalent: no direct]
+read-only = true                             # Checks read-only. (Modifying read-only). [BasedPyright equivalent: no direct]
+redefinition = true                          # Checks redefinitions. (Re-annotating with different type). [BasedPyright equivalent: reportRedeclaration]
+redundant-cast = true                        # Checks redundant casts. (Unneeded cast). [BasedPyright equivalent: reportUnnecessaryCast]
+redundant-condition = true                   # Checks redundant conditions. (Always true/false cond). [BasedPyright equivalent: reportUnnecessaryComparison]
+reveal-type = true                           # Checks reveal_type. (typing.reveal_type() output). [BasedPyright equivalent: no direct]
+unannotated-attribute = true                 # Checks unannotated attributes. (None-init attr without annotation). [BasedPyright equivalent: reportUninitializedInstanceVariable]
+unannotated-parameter = true                 # Checks unannotated parameters (Untyped param). [BasedPyright equivalent: reportUnknownParameterType]
+unannotated-return = true                    # Checks unannotated returns. (Untyped return). [BasedPyright equivalent: reportUnannotatedReturn]
+unbound-name = true                          # Checks unbound names. Undefined var (NameError). [BasedPyright equivalent: reportPossiblyUnboundVariable]
+unexpected-keyword = true                    # Checks unexpected keywords. (Extra kwarg). [BasedPyright equivalent: reportCallIssue]
+unexpected-positional-argument = true        # Checks positional args (Pos arg for kw-only). [BasedPyright equivalent: reportCallIssue]
+unknown-name = true                          # Checks unknown names. (Unknown name from scope). [BasedPyright equivalent: reportUnknownVariableType]
+unnecessary-comparison = true                # Checks unnecessary comparisons. (Unnecessary comparison). [BasedPyright equivalent: reportUnnecessaryComparison]
+unsupported = true                           # Checks unsupported features. (Unsupported feature). [BasedPyright equivalent: reportUnsupported]
+unsupported-delete = true                    # Checks deletes. (Delete on unsupported). [BasedPyright equivalent: no direct]
+unsupported-operation = true                 # Checks operations (Unsupported op). [BasedPyright equivalent: reportOperatorIssue]
+untyped-import = true                        # Checks untyped imports (Import without types). [BasedPyright equivalent: reportUntypedBaseClass]
+unused-coroutine = true                      # Checks unused coroutines. (Unused coroutine). [BasedPyright equivalent: no direct]
+unused-variable = false                      # Disables unused variable checks in Pyrefly (added to exempt "_")
+
+[tool.basedpyright] # BasedPyright configuration section
+# basedpyright settings 
+# ---------------------
+typeCheckingMode = "recommended"           # The recommended setting collection.                             # Sets type checking mode to recommended
+pythonVersion = "3.12"                     # Python version for checking
+pythonPlatform = "Linux"                   # Target platform
+defineConstant = { LOG_FILE_PATH = false } # Indicates LOG_FILE_PATH is not defined.               # Defines constants for conditional checking
+reportAny = false                          # Don't flag types set to Any.                                                   # Disables reporting Any types
+reportExplicitAny = false                  # Disables reporting explicit Any
+reportUnknownVariableType = false          # Disables unknown variable types
+reportUnknownArgumentType = false          # Disables unknown argument types
+reportUnknownMemberType = true             # Enables unknown member types
+reportUnknownParameterType = true          # Enables unknown parameter types
+reportMissingParameterType = true          # Enables missing parameter types
+
+[tool.ruff] # Ruff linter configuration
+# ruff settings
+# -------------
+exclude = [ # Files/directories to exclude from linting
+  ".bzr",               # Bazaar version control
+  ".direnv",            # Direnv configuration
+  ".eggs",              # Egg files
+  ".git",               # Git repository
+  ".git-rewrite",       # Git rewrite
+  ".hg",                # Mercurial repository
+  ".ipynb_checkpoints", # Jupyter checkpoints
+  ".mypy_cache",        # Mypy cache
+  ".nox",               # Nox sessions
+  ".pants.d",           # Pants build system
+  ".pyenv",             # Pyenv
+  ".pytest_cache",      # Pytest cache
+  ".pytype",            # Pytype cache
+  ".ruff_cache",        # Ruff cache
+  ".svn",               # Subversion
+  ".tox",               # Tox environments
+  ".venv",              # Virtual env
+  ".vscode",            # VS Code settings
+  "pypackages",         # PEP 582 packages
+  "_build",             # Build directory
+  "buck-out",           # Buck build
+  "build",              # Build directory
+  "dist",               # Distribution
+  "node_modules",       # Node.js modules
+  "site-packages",      # Site packages
+  "venv",               # Virtual env
+]
+line-length = 88 # Maximum line length
+indent-width = 4 # Indentation width
+target-version = "py312" # Target Python version
+[tool.ruff.lint] # Lint-specific settings
+dummy-variable-rgx = "^_+$"                   # Regex for dummy variables to ignore in F841
+select = ["ALL"]                              # Select all rules
+ignore = ["D203", "COM812", "ISC001", "D212"] # Rules to ignore
+task-tags = ["TODO", "FIXME", "XXX"]          # Tags for tasks
+fixable = ["ALL"]                             # Rules that can be auto-fixed
+unfixable = []                                # Rules that cannot be fixed
+[tool.ruff.lint.flake8-import-conventions.aliases] # Import aliases
+# Declare the default aliases. 
+altair = "alt"              # Alias for altair
+"matplotlib.pyplot" = "plt" # Alias for matplotlib.pyplot
+numpy = "np"                # Alias for numpy
+pandas = "pd"               # Alias for pandas
+seaborn = "sns"             # Alias for seaborn
+scipy = "sp"                # Alias for scipy
+[tool.ruff.format] # Format settings
+quote-style = "double"            # Use double quotes
+indent-style = "space"            # Use spaces for indentation
+skip-magic-trailing-comma = false # Don't skip trailing comma in magic methods
+line-ending = "auto"              # Auto-detect line endings
+docstring-code-format = true      # Format code in docstrings
+docstring-code-line-length = 88   # Explicit for snippets.
+[tool.ruff.lint.pycodestyle]
+max-doc-length = 88  # Flags W505 for docstring lines >88; no auto-fix, but warns.
+max-line-length = 88 # For E501 consistency (though formatter handles wrapping).
+[tool.ruff.lint.pydocstyle]
+convention = "numpy" # Enables NumPy-specific checks (e.g., section order).

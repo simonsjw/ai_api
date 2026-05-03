@@ -1,0 +1,40 @@
+.
+├── docs
+│   └── PYTHON_APPROACHES.md
+├── src
+│   └── ai_api
+│       ├── core
+│       │   ├── common
+│       │   │   ├── chat_session.py
+│       │   │   ├── errors.py
+│       │   │   ├── persistence.py
+│       │   │   └── response_struct.py
+│       │   ├── ollama
+│       │   │   ├── chat_stream_ollama.py
+│       │   │   ├── chat_turn_ollama.py
+│       │   │   ├── embeddings_ollama.py
+│       │   │   └── errors_ollama.py
+│       │   ├── xai
+│       │   │   ├── chat_batch_xai.py
+│       │   │   ├── chat_stream_xai.py
+│       │   │   ├── chat_turn_xai.py
+│       │   │   └── errors_xai.py
+│       │   ├── base_provider.py
+│       │   ├── client_factory.py
+│       │   ├── core_README.md
+│       │   ├── ollama_client.py
+│       │   └── xai_client.py
+│       └── data_structures
+│           ├── base_objects.py
+│           ├── data_structures_README.md
+│           ├── db_responses_schema.py
+│           ├── ollama_objects.py
+│           └── xai_objects.py
+├── environment_grok.yml
+├── .gitignore
+├── projectDirectoryMap.txt
+├── pyproject.toml
+├── README.md
+└── tree.txt
+
+9 directories, 29 files
