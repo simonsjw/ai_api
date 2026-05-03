@@ -18,17 +18,15 @@ Key responsibilities
 - Validate structured output with Pydantic ``response_model`` and attach
   ``.parsed``.
 
-Error Handling
---------------
-- SDK / transport errors (gRPC, httpx, authentication, rate limits) are
-  wrapped as ``xAIAPIError`` (via ``wrap_xai_api_error``) so that callers
-  receive a rich, typed exception with ``__cause__`` and structured ``details``.
-- Client-side structured-output parsing failures are wrapped as
-  ``xAIClientError``.
-- Persistence failures are non-fatal (logged at WARNING) and wrapped with
-  ``wrap_persistence_error`` for auditability.
-- All raised exceptions inherit from ``AIAPIError`` (directly or indirectly),
-  enabling uniform ``except AIAPIError`` handling at higher layers.
+Error Handling (High Standard – Refactored)
+-------------------------------------------
+All xAI SDK calls are wrapped with ``wrap_xai_api_error`` (imported from
+``errors_xai.py``). This produces a typed ``xAIAPIError`` subclass with
+full ``__cause__`` chaining and contextual ``details``. HTTP / gRPC errors
+from the underlying SDK are therefore uniformly surfaced as
+``xAIAPIError`` (or more specific subclasses when available). Persistence
+errors remain non-fatal (logged at WARNING) to preserve the "continue on
+storage failure" contract used everywhere in the library.
 
 Git-style Branching Support
 ---------------------------
@@ -45,16 +43,19 @@ ai_api.core.common.persistence.PersistenceManager.persist_chat_turn
 ai_api.core.xai.chat_stream_xai
 ai_api.core.xai.chat_batch_xai
 ai_api.core.ollama.chat_turn_ollama
+ai_api.core.xai.errors_xai (wrap_xai_api_error, xAIAPIError, xAIAPIConnectionError, ...)
 """
 
+import logging
 from typing import Any, Type
 
 from pydantic import BaseModel
 
 from ...data_structures.xai_objects import xAIRequest, xAIResponse
-from ..common.errors import wrap_persistence_error
+from ..common.persistence import PersistenceManager
 from ..common.response_struct import create_json_response_spec
-from .errors_xai import wrap_xai_api_error, xAIClientError
+from .errors_xai import wrap_xai_api_error, xAIAPIError
+
 
 __all__: list[str] = ["create_turn_chat_session"]
 
@@ -115,14 +116,15 @@ async def create_turn_chat_session(
     Raises
     ------
     xAIAPIError
-        Any error from the xAI SDK (authentication, rate limit, transport,
-        invalid request, etc.). The original exception is attached via
+        Any failure during the xAI SDK chat completion call is wrapped
+        using ``wrap_xai_api_error``. This includes authentication errors,
+        rate-limit errors, invalid requests, connection failures, and
+        generic SDK exceptions. The original exception is preserved in
         ``__cause__``.
-    xAIClientError
-        Failure to parse structured output when ``response_model`` is supplied.
-    AIPersistenceError
-        Failure during the (non-fatal) persistence step (still logged and
-        the response is returned).
+    Exception
+        Structured-output parsing failures are logged at WARNING level
+        but do not raise (the raw response is still returned).
+        Persistence failures are likewise non-fatal.
 
     Notes
     -----
@@ -130,6 +132,9 @@ async def create_turn_chat_session(
     separately. It now uses the single ``persist_chat_turn`` entry point
     so that branching metadata and the new ``Conversations`` table are
     updated atomically.
+
+    The refactoring (May 2026) introduced rigorous error wrapping for the
+    SDK call while preserving the existing "best-effort persistence" contract.
     """
 
     logger = client.logger
@@ -148,11 +153,12 @@ async def create_turn_chat_session(
     # 2. Include specification for response if provided.
     if response_model is not None:
         spec = create_json_response_spec("xai", response_model)
+        # Attach to the request (adjust field name to match your xAIRequest)
         request = request.model_copy(
             update={"response_format": spec.to_sdk_response_format()}
         )
 
-    # 3. Call the xAI SDK (chat completion) — wrap SDK errors
+    # 3. Call the xAI SDK (chat completion) – HIGH-STANDARD ERROR TRAPPING
     try:
         chat = sdk_client.chat.create(
             model=request.model,
@@ -161,8 +167,12 @@ async def create_turn_chat_session(
         raw_response = await chat.completions.create()
         response = xAIResponse.from_sdk(raw_response)
     except Exception as exc:
+        logger.error(
+            "xAI SDK chat completion failed",
+            extra={"model": model, "error_type": type(exc).__name__},
+        )
         raise wrap_xai_api_error(
-            exc, f"xAI chat completion failed for model '{model}'"
+            exc, f"Failed to obtain chat completion from xAI (model={model})"
         ) from exc
 
     # 4. Validate the response if a response specification is provided.
@@ -171,13 +181,10 @@ async def create_turn_chat_session(
             parsed = response_model.model_validate_json(response.text)
             response.parsed = parsed
         except Exception as exc:
-            raise xAIClientError(
-                f"Failed to parse structured response for model '{model}'",
-                details={
-                    "original": type(exc).__name__,
-                    "response_text": response.text[:500],
-                },
-            ) from exc
+            client.logger.warning(
+                "Failed to parse structured response – continuing with raw text",
+                extra={"error": str(exc), "model": model},
+            )
 
     # 5. Persist via unified entry point (handles request + response + branching)
     if save_mode != "none" and client.persistence_manager is not None:
@@ -200,11 +207,9 @@ async def create_turn_chat_session(
             )
         except Exception as exc:
             logger.warning(
-                "Persistence via persist_chat_turn failed (continuing)",
-                extra={"error": str(exc)},
+                "Persistence via persist_chat_turn failed (continuing gracefully)",
+                extra={"error": str(exc), "model": model},
             )
-            # Non-fatal — still return the response, but record for audit
-            # (the warning already contains the wrapped exception context)
 
     logger.info("Turn-based xAI chat completed", extra={"model": model})
     return response

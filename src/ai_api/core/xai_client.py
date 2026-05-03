@@ -16,6 +16,7 @@ High-level responsibilities
     - ``chat_turn_xai.py`` for non-streaming single turns (with structured output)
     - ``chat_stream_xai.py`` for real-time token streaming (final response persisted)
     - ``chat_batch_xai.py`` for efficient per-request structured output in batch
+    - ``embeddings_xai.py`` for embedding generation (OpenAI-compatible ``/v1/embeddings``)
 - Provide xAI-specific convenience methods: ``list_models()``, ``get_model_info()``.
 - Support symmetrical persistence (request + response) via ``PersistenceManager``
   for all modes when ``save_mode != "none"``.
@@ -24,7 +25,7 @@ High-level responsibilities
 How it uses the rest of core/
 -----------------------------
 - Inherits shared HTTP/SDK client lifecycle from ``BaseXAIClient``.
-- Imports concrete implementations from ``xai/chat_*.py``.
+- Imports concrete implementations from ``xai/chat_*.py`` and ``xai/embeddings_xai.py``.
 - The ``XAIClient(...)`` factory (and mode classes) are automatically registered
   with ``client_factory.py`` at import time via ``register_provider``.
 - All returned objects satisfy ``LLMProviderAdapter`` (structural Protocol from
@@ -36,8 +37,8 @@ Comparison with Ollama client
 -----------------------------
 - **xAI**: SDK-based, native batch endpoint with flexible per-request
   ``response_model`` lists, richer remote error taxonomy, thinking mode,
-  multimodal, prompt caching. No native embeddings or model management
-  (use generic HTTP methods or the ``EmbedXAIClient`` stub for future).
+  multimodal, prompt caching. Embeddings via dedicated ``embeddings_xai.py``
+  (delegated from EmbedXAIClient) using the OpenAI-compatible endpoint.
 - **Ollama**: native HTTP, dozens of low-level generation parameters
   (num_ctx, repeat_penalty, think, mirostat, ...), native embeddings +
   model pull/show/list, simulated batch via asyncio, GPU-memory warnings on OOM.
@@ -80,11 +81,20 @@ Example usage (recommended via factory)
         save_mode="json_files",
     )
 
+    # Embeddings (delegated to embeddings_xai.py)
+    xai_embed = get_llm_client("xai", logger=logger, mode="embed", api_key=...)
+    emb = await xai_embed.create_chat(
+        input="The quick brown fox jumps over the lazy dog.",
+        model="text-embedding-3-large",
+        save_mode="postgres",
+    )
+    print(len(emb.embeddings))  # 3072 (or configured dimensions)
+
 See Also
 --------
 ai_api.core.ollama_client : Local provider implementation (identical public surface).
 ai_api.core.client_factory : Unified entry point (get_llm_client).
-ai_api.core.xai.chat_turn_xai, chat_stream_xai, chat_batch_xai : Delegated logic.
+ai_api.core.xai.chat_turn_xai, chat_stream_xai, chat_batch_xai, embeddings_xai : Delegated logic.
 ai_api.core.common.persistence.PersistenceManager : Symmetrical request/response storage.
 """
 
@@ -105,6 +115,7 @@ from .common.persistence import PersistenceManager
 from .xai.chat_batch_xai import create_batch_chat
 from .xai.chat_stream_xai import generate_stream_and_persist
 from .xai.chat_turn_xai import create_turn_chat_session
+from .xai.embeddings_xai import XAIEmbedResponse, create_embeddings
 
 __all__: list[str] = [
     "ChatMode",
@@ -483,7 +494,19 @@ class BatchXAIClient(BaseXAIClient):
 
 
 class EmbedXAIClient(BaseXAIClient):
-    """Embeddings client for xAI (uses OpenAI-compatible /v1/embeddings endpoint)."""
+    """Embeddings client for xAI.
+
+    Thin wrapper that delegates all embedding work to ``create_embeddings`` in
+    ``xai/embeddings_xai.py``. This keeps the provider architecture consistent:
+    the high-level client classes in ``*_client.py`` only wire up the public API
+    and lifecycle; the actual implementation (HTTP call, response normalisation
+    into a rich ``XAIEmbedResponse``, error handling, and persistence) lives in
+    the provider-specific subpackage.
+
+    The delegated function returns an ``XAIEmbedResponse`` (with ``.embeddings``,
+    ``.usage``, ``.raw``, and ``to_neutral_format()``) instead of a raw dict,
+    matching the pattern used by ``EmbedOllamaClient``.
+    """
 
     async def create_chat(
         self,
@@ -492,8 +515,8 @@ class EmbedXAIClient(BaseXAIClient):
         *,
         save_mode: SaveMode = "none",
         **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Generate embeddings for one or more texts.
+    ) -> XAIEmbedResponse:
+        """Generate embeddings for one or more texts (delegates to embeddings_xai.py).
 
         Parameters
         ----------
@@ -504,54 +527,23 @@ class EmbedXAIClient(BaseXAIClient):
         save_mode : {"none", "json_files", "postgres"}, default "none"
             Persistence backend.
         **kwargs
-            Extra payload fields (e.g. dimensions, encoding_format).
+            Extra payload fields (e.g. dimensions, encoding_format) forwarded
+            to the embeddings endpoint and to the persisted request object.
 
         Returns
         -------
-        dict
-            Raw embeddings response from xAI (data, model, usage, ...).
+        XAIEmbedResponse
+            Rich response object containing the embedding vector(s), usage
+            statistics, and the original raw payload. Supports
+            ``to_neutral_format()`` for persistence.
         """
-        self.logger.info(
-            "xAI embeddings request",
-            extra={
-                "model": model,
-                "input_count": len(input) if isinstance(input, list) else 1,
-            },
+        return await create_embeddings(
+            self,
+            input=input,
+            model=model,
+            save_mode=save_mode,
+            **kwargs,
         )
-
-        http_client = await self._get_http_client()
-        payload = {"input": input, "model": model, **kwargs}
-        try:
-            resp = await http_client.post("/v1/embeddings", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as exc:
-            self.logger.error("xAI embeddings failed", extra={"error": str(exc)})
-            raise
-
-        # Optional persistence (embedding kind, no branching)
-        if save_mode != "none" and self.persistence_manager is not None:
-            try:
-                # Build a proper request object so we stay inside the protocol contract
-                embed_request = xAIRequest(
-                    model=model,
-                    input=" | ".join(input) if isinstance(input, list) else input,
-                    save_mode=save_mode,
-                    **kwargs,
-                )
-                await self.persistence_manager.persist_chat_turn(
-                    data,                                                                 # provider_response (still a dict for now — see note below)
-                    embed_request,                                                        # ← now correctly typed
-                    kind="embedding",
-                    branching=False,
-                )
-            except Exception as exc:
-                self.logger.warning(
-                    "Embedding persistence failed (continuing)",
-                    extra={"error": str(exc)},
-                )
-
-        return data
 
 
 def XAIClient(
@@ -571,9 +563,8 @@ def XAIClient(
     ----------
     logger : logging.Logger
         Structured logger.
-    mode : {"turn", "stream", "batch"}, default "turn"
-        Desired interaction mode. "embed" is not supported here (use
-        ``EmbedXAIClient`` directly for embeddings).
+    mode : {"turn", "stream", "batch", "embed"}, default "turn"
+        Desired interaction mode. All four modes are fully supported.
     api_key : str
         xAI API key.
     persistence_manager : PersistenceManager, optional
@@ -606,7 +597,7 @@ def XAIClient(
         raise ValueError(f"Unsupported xAI mode: {mode}")
 
 
-# Auto-register with the central factory (turn / stream / batch only)
+# Auto-register with the central factory (turn / stream / batch / embed)
 from .client_factory import register_provider
 
 register_provider(

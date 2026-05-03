@@ -1,28 +1,35 @@
 """
 High-level asynchronous client for Ollama (local) using native API.
 
-This module provides the low-level Ollama client implementations.
-**For most use cases — especially anything involving persistence, branching,
-forking, or history editing — use ``ChatSession`` (from ``common.chat_session``)
-instead of calling these classes directly.**
+This module provides the public-facing ``OllamaClient`` factory and the four
+mode-specific client classes (``TurnOllamaClient``, ``StreamOllamaClient``,
+``BatchOllamaClient``, ``EmbedOllamaClient``). It mirrors the exact public
+API of ``xai_client.py`` so you can swap providers with minimal code changes.
 
 High-level responsibilities
 ---------------------------
-- Provide the concrete `TurnOllamaClient`, `StreamOllamaClient`, etc. classes
-  that satisfy ``LLMProviderAdapter``.
+- Expose a consistent ``create_chat(messages, model, mode=..., response_model=...,
+    save_mode=...)`` API.
 - Delegate actual work to the provider-specific modules in ``ollama/``:
   - ``chat_turn_ollama.py`` for non-streaming
   - ``chat_stream_ollama.py`` for streaming (real-time persistence of final response)
+  - ``chat_batch_ollama.py`` for simulated batch (concurrent or sequential turns)
   - ``embeddings_ollama.py`` for embeddings (self-contained protocol implementation)
-- Provide Ollama-specific helpers (`list_models()`, `pull_model()`, etc.).
+- Provide Ollama-specific convenience methods: ``list_models()``, ``pull_model()``,
+  ``show_model()``, ``get_model_options()`` (not present in xAI client).
+- Use ``PersistenceManager`` from ``common/persistence.py`` for symmetrical
+  request/response persistence.
+- Support structured JSON output via ``response_model`` (Pydantic) using the
+  common ``create_json_response_spec`` helper (delegated to the chat modules).
 
 How it uses the rest of core/
 -----------------------------
+- Imports ``PersistenceManager`` and error wrappers from ``common/``.
 - Imports concrete implementations from ``ollama/chat_*.py``
   and ``ollama/embeddings_ollama.py``.
-- All classes satisfy ``LLMProviderAdapter``.
-- Branching parameters (`tree_id`, `branch_id`, `parent_response_id`, etc.) are
-  passed through via `**kwargs` to the underlying chat modules.
+- The ``OllamaClient(...)`` factory (and the mode classes) are automatically
+  registered with ``client_factory.py`` at import time.
+- All returned objects satisfy ``LLMProviderAdapter`` (from ``base_provider.py``).
 
 Comparison with xAI client
 --------------------------
@@ -33,48 +40,42 @@ Comparison with xAI client
   richer remote error taxonomy, no dedicated embeddings or model-pull methods
   (use the generic HTTP methods instead).
 
-Recommended usage (ChatSession)
---------------------------------
-.. code-block:: python
-
-    from ai_api.core.client_factory import get_llm_client
-    from ai_api.core.common.chat_session import ChatSession
-    from ai_api.core.common.persistence import PersistenceManager
-    import logging
-
-    logger = logging.getLogger(__name__)
-    pm = PersistenceManager(logger=logger, db_url="postgresql://...")
-
-    client = get_llm_client("ollama", logger=logger, persistence_manager=pm)
-    session = ChatSession(client, pm)
-
-    resp, meta = await session.create_or_continue(
-        "Explain quantum entanglement", model="llama3.2"
-    )
-
-    # Edit history later (creates new immutable branch)
-    await session.edit_history(
-        edit_ops=[{"op": "remove_turns", "indices": [0]}], new_branch_name="cleaned"
-    )
-
-Advanced / low-level usage (still supported)
+Example usage
 -------------
 .. code-block:: python
 
     from ai_api.core.ollama_client import OllamaClient
     from ai_api.core.common.persistence import PersistenceManager
     import logging
+    from pathlib import Path
 
-    logger = logging.getLogger(__name__)
-    pm = PersistenceManager(logger=logger, db_url="postgresql://...")
+    logger = pgk.logging.getLogger(
+        __name__
+    )  # drop-in; supports DB backend via configure_logging
+    pm = PersistenceManager(logger=logger, json_dir=Path("./logs"))
 
     client = OllamaClient(
-        logger=logger, host="http://localhost:11434", persistence_manager=pm
+        logger=logger,
+        host="http://localhost:11434",
+        persistence_manager=pm,
+        mode="stream",  # or "turn", "batch"
     )
+
+    # Streaming with persistence
     async for chunk in client.create_chat(
-        messages=..., model="llama3.2", save_mode="postgres"
+        messages=[{"role": "user", "content": "Tell me a story"}],
+        model="llama3.2",
+        save_mode="postgres",
     ):
         print(chunk.text, end="")
+
+    # Embeddings (separate client – uses create_chat in embed mode)
+    embed_client = EmbedOllamaClient(logger=logger, persistence_manager=pm)
+    emb = await embed_client.create_chat(
+        input=["hello", "world"],
+        model="nomic-embed-text",
+        save_mode="json_files",
+    )
 """
 
 from __future__ import annotations
@@ -85,19 +86,29 @@ from collections.abc import AsyncIterator
 from typing import Any, Literal, Optional, Type, cast
 
 import httpx
+import py_pgkit as pgk
+from py_pgkit import PgSettings
+from py_pgkit.db import PgSettings
 from pydantic import BaseModel
 
-from ..data_structures.base_objects import LLMStreamingChunkProtocol
+from ai_api.core.common.persistence import PersistenceManager
+
 from ..data_structures.ollama_objects import (
+    LLMStreamingChunkProtocol,
     OllamaInput,
+    OllamaJSONResponseSpec,
+    OllamaMessage,
     OllamaRequest,
     OllamaResponse,
+    OllamaRole,
+    OllamaStreamingChunk,
     SaveMode,
 )
 from .client_factory import register_provider
 from .common.persistence import PersistenceManager
 from .ollama.chat_stream_ollama import generate_stream_and_persist
 from .ollama.chat_turn_ollama import create_turn_chat_session
+from .ollama.chat_batch_ollama import create_batch_chat
 
 # Re-export the canonical implementation from embeddings_ollama.py
 from .ollama.embeddings_ollama import (
@@ -363,16 +374,22 @@ class StreamOllamaClient(BaseOllamaClient):
 
 
 class BatchOllamaClient(BaseOllamaClient):
-    """Batch chat client (simulated – Ollama has no native batch endpoint).
+    """Batch chat client for Ollama (simulated via independent turns).
 
-    Runs multiple independent turn-based chats.  Use ``concurrent=True`` only
-    when you have sufficient GPU memory or multiple Ollama instances.
+    Thin delegation wrapper. All batch orchestration, concurrent execution,
+    and per-turn persistence live in ``ollama/chat_batch_ollama.py`` so that
+    the provider architecture is identical to xAI (``chat_batch_xai.py``).
+
+    The client normalises a possible single-conversation input into a list of
+    conversations and optionally unwraps the result back to a single response
+    object when the caller supplied only one conversation. This matches the
+    behaviour of ``BatchXAIClient``.
     """
 
     async def create_chat(
         self,
         messages: list[dict[str, Any]] | list[list[dict[str, Any]]],
-        model: str,
+        model: str = "llama3.2",
         *,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
@@ -389,75 +406,68 @@ class BatchOllamaClient(BaseOllamaClient):
         response_model: Type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> list[OllamaResponse] | OllamaResponse:
-        """Execute one or more chat turns (delegates to TurnOllamaClient).
+        """Execute one or more chat turns (delegates to create_batch_chat).
 
-        Normalises input so that TurnOllamaClient **always** receives `list[dict[str, Any]]`.
+        Parameters
+        ----------
+        messages : list[dict] or list[list[dict]]
+            Either a single conversation or a list of conversations.
+        model : str, default "llama3.2"
+            Ollama model applied to all items.
+        temperature, top_p, top_k, seed, max_tokens, repeat_penalty, num_ctx,
+        stop, mirostat, think : optional
+            Full set of Ollama generation parameters (passed through).
+        save_mode : {"none", "json_files", "postgres"}, default "none"
+            Persistence backend (applied per item).
+        concurrent : bool, default False
+            Run turns concurrently (``asyncio.gather``) or sequentially.
+        response_model : type[BaseModel] or None, optional
+            Structured output model (same model used for every item).
+        **kwargs
+            Forwarded to each turn.
+
+        Returns
+        -------
+        list[OllamaResponse] or OllamaResponse
+            List of responses (one per input conversation) or a single
+            response when a single conversation was supplied.
         """
-        turn_client = TurnOllamaClient(
-            logger=self.logger,
-            host=self.host,
-            timeout=self.timeout,
-            persistence_manager=self.persistence_manager,
-        )
-
-        # === ROBUST NORMALISATION (fixes remaining type errors) ===
-        if not messages:
-            messages = []
-
-        if isinstance(messages[0], dict):
-            # Single conversation → wrap it so the rest of the code only sees list-of-lists
-            messages = [messages]                                                         # type: ignore[assignment]
-
-        # Now we can safely cast — Pyrefly knows it's list[list[dict]]
-        conv_list: list[list[dict[str, Any]]] = cast(
-            list[list[dict[str, Any]]], messages
-        )
-
-        if concurrent:
-            tasks = [
-                turn_client.create_chat(
-                    conv,                                                                 # ← now guaranteed to be list[dict]
-                    model,
-                    temperature=temperature,
-                    top_p=top_p,
-                    top_k=top_k,
-                    seed=seed,
-                    max_tokens=max_tokens,
-                    repeat_penalty=repeat_penalty,
-                    num_ctx=num_ctx,
-                    stop=stop,
-                    mirostat=mirostat,
-                    think=think,
-                    save_mode=save_mode,
-                    response_model=response_model,
-                    **kwargs,
-                )
-                for conv in conv_list
-            ]
-            return await asyncio.gather(*tasks)
+        # Normalise to list-of-conversations for the batch helper
+        if (
+            isinstance(messages, list)
+            and len(messages) > 0
+            and isinstance(messages[0], dict)
+        ):
+            # Single conversation → wrap so batch helper returns list of 1
+            messages_list: list[list[dict[str, Any]]] = [messages]
+            single_result = True
         else:
-            results: list[OllamaResponse] = []
-            for conv in conv_list:
-                results.append(
-                    await turn_client.create_chat(
-                        conv,                                                             # ← now guaranteed to be list[dict]
-                        model,
-                        temperature=temperature,
-                        top_p=top_p,
-                        top_k=top_k,
-                        seed=seed,
-                        max_tokens=max_tokens,
-                        repeat_penalty=repeat_penalty,
-                        num_ctx=num_ctx,
-                        stop=stop,
-                        mirostat=mirostat,
-                        think=think,
-                        save_mode=save_mode,
-                        response_model=response_model,
-                        **kwargs,
-                    )
-                )
-            return results
+            messages_list = cast(list[list[dict[str, Any]]], messages)
+            single_result = False
+
+        results = await create_batch_chat(
+            self,
+            messages_list,
+            model=model,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            seed=seed,
+            max_tokens=max_tokens,
+            repeat_penalty=repeat_penalty,
+            num_ctx=num_ctx,
+            stop=stop,
+            mirostat=mirostat,
+            think=think,
+            save_mode=save_mode,
+            concurrent=concurrent,
+            response_model=response_model,
+            **kwargs,
+        )
+
+        if single_result:
+            return results[0]
+        return results
 
 
 class EmbedOllamaClient(BaseOllamaClient):
