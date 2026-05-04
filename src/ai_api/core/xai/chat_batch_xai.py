@@ -4,7 +4,7 @@ xAI Batch Chat Processing with Flexible Structured Output
 This module implements native batch processing for xAI (unlike Ollama,
 which has no native batch endpoint). It is the backend for
 ``BatchXAIClient.create_chat`` and is designed to be called from
-``ChatSession`` when ``mode="batch"``.
+``ChatSession`` when ``mode=\"batch\"``.
 
 Features
 --------
@@ -20,14 +20,14 @@ Features
 
 Error Handling
 --------------
-- Mismatched ``response_model`` list length raises ``xAIClientError``
-  (via ``wrap_xai_client_error``) for clear client-side validation.
-- Structured-output spec creation errors are wrapped as ``xAIClientError``.
-- Per-item errors from ``create_turn_chat_session`` (``xAIAPIError``,
-  ``xAIClientError``, etc.) propagate naturally — the batch fails fast on
+- Mismatched ``response_model`` list length raises ``XAIClientError``
+  (via ``wrap_error``) for clear client-side validation.
+- Structured-output spec creation errors are wrapped as ``XAIClientError``.
+- Per-item errors from ``create_turn_chat_session`` (``XAIError``,
+  ``XAIClientError``, etc.) propagate naturally — the batch fails fast on
   the first failing item (consistent with most batch semantics).
-- All raised exceptions inherit from ``AIAPIError`` (directly or indirectly),
-  enabling uniform ``except AIAPIError`` handling at higher layers.
+- All raised exceptions inherit from ``APIError`` (directly or indirectly),
+  enabling uniform ``except APIError`` handling at higher layers.
 
 See Also
 --------
@@ -41,9 +41,11 @@ from typing import Any, Type
 
 from pydantic import BaseModel
 
+from ...data_structures.base_objects import SaveMode
 from ...data_structures.xai_objects import xAIRequest
-from ..common.errors import wrap_client_error
+from ..common.errors import wrap_error
 from ..common.response_struct import create_json_response_spec
+from .errors_xai import XAIClientError
 
 __all__: list[str] = ["create_batch_chat"]
 
@@ -55,7 +57,7 @@ async def create_batch_chat(
     *,
     temperature: float | None = None,
     max_tokens: int | None = None,
-    save_mode: str = "none",
+    save_mode: SaveMode = SaveMode.NONE,
     response_model: list[Type[BaseModel]] | Type[BaseModel] | None = None,
     **kwargs: Any,
 ) -> list[Any]:
@@ -80,7 +82,7 @@ async def create_batch_chat(
         Sampling temperature (applied uniformly).
     max_tokens : int or None, optional
         Max tokens per response.
-    save_mode : {"none", "json_files", "postgres"}, default "none"
+    save_mode : SaveMode, default SaveMode.NONE
         Persistence backend (passed to each item).
     response_model : Type[BaseModel], list[Type[BaseModel]], or None, optional
         Structured-output model(s). If a list, length must equal
@@ -97,10 +99,10 @@ async def create_batch_chat(
 
     Raises
     ------
-    xAIClientError
+    XAIClientError
         If ``response_model`` is a list and its length does not equal
         ``len(messages_list)``, or if structured-output spec creation fails.
-    xAIAPIError
+    XAIError
         Any per-item transport, authentication, or model error from the
         underlying ``create_turn_chat_session`` call (propagates immediately).
     """
@@ -115,9 +117,11 @@ async def create_batch_chat(
                 f"response_model list length ({len(response_model)}) "
                 f"must equal number of batch requests ({len(messages_list)})"
             )
-            raise wrap_client_error(
-                exc,
+            raise wrap_error(
+                XAIClientError,
                 "response_model list length mismatch in xAI batch request",
+                exc,
+                details={"batch_size": len(messages_list), "response_model_len": len(response_model)},
             ) from exc
 
     results = []
@@ -147,9 +151,10 @@ async def create_batch_chat(
                     update={"response_format": spec.to_sdk_response_format()}
                 )
             except Exception as exc:
-                raise wrap_client_error(
-                    exc,
+                raise wrap_error(
+                    XAIClientError,
                     f"Failed to build structured-output spec for batch item {idx}",
+                    exc,
                 ) from exc
 
         # Reuse the turn-based logic (keeps code DRY)
