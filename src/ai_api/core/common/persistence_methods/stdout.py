@@ -23,6 +23,11 @@ must still be returned for further processing.
 All three modules share an identical documentation template so that a developer
 who understands one instantly understands the others by direct comparison.
 
+**Error handling (updated 2026)**
+
+Any failure during text extraction or printing is wrapped via the single
+Generic ``wrap_error(OutputPersistenceError, ...)``.  This keeps the error
+model uniform across all persistence strategies.
 """
 
 from __future__ import annotations
@@ -39,7 +44,7 @@ import py_pgkit as pgk
 from py_pgkit.db import PgSettings
 from py_pgkit.db import get_pool as get_pgk_pool
 
-from ..errors import wrap_persistence_error
+from ..errors import wrap_error, OutputPersistenceError
 
 __all__ = ["StdoutPersistenceBackend"]
 
@@ -103,9 +108,9 @@ class StdoutPersistenceBackend:
 
         The method first tries ``response_blob["response"]["content"]`` or
         ``["text"]``, then falls back to a compact string representation.
-        Any extraction error is wrapped using ``wrap_persistence_error`` and
-        logged at WARNING level (non-fatal — the caller still receives the
-        response object).
+        Any extraction error is wrapped using the single generic
+        ``wrap_error(OutputPersistenceError, ...)`` and logged at WARNING level
+        (non-fatal — the caller still receives the response object).
 
         Parameters
         ----------
@@ -164,9 +169,10 @@ class StdoutPersistenceBackend:
                 "kind": kind,
             }
         except Exception as exc:
-            err = wrap_persistence_error(
-                exc,
+            err = wrap_error(
+                OutputPersistenceError,
                 "Failed to echo response to stdout",
+                exc,
                 details={"model": meta.get("model"), "kind": kind},
                 logger=self.logger,
                 level=logging.WARNING,

@@ -22,6 +22,11 @@ logging where a full database would be overkill.
 All three modules share an identical documentation template so that a developer
 who understands one instantly understands the others.
 
+**Error handling (updated 2026)**
+
+Filesystem errors are wrapped via the single generic ``wrap_error(FilePersistenceError, ...)``.
+This ensures every JSON write failure carries the precise custom type and
+is logged exactly once.
 """
 
 from __future__ import annotations
@@ -38,7 +43,7 @@ import py_pgkit as pgk
 from py_pgkit.db import PgSettings
 from py_pgkit.db import get_pool as get_pgk_pool
 
-from ..errors import wrap_persistence_error
+from ..errors import wrap_error, FilePersistenceError
 
 __all__ = ["JsonFilePersistenceBackend"]
 
@@ -113,8 +118,8 @@ class JsonFilePersistenceBackend:
         supplied metadata, augmented with a ``created_at`` timestamp and the
         backend identifier.
 
-        Any filesystem error (permission, disk full, etc.) is wrapped using
-        ``wrap_persistence_error`` and logged at WARNING level.
+        Any filesystem error is caught and converted via the single generic
+        ``wrap_error(FilePersistenceError, ...)`` with full context and logging.
 
         Parameters
         ----------
@@ -177,9 +182,10 @@ class JsonFilePersistenceBackend:
                 "kind": kind,
             }
         except Exception as exc:
-            err = wrap_persistence_error(
-                exc,
+            err = wrap_error(
+                FilePersistenceError,
                 "Failed to write JSON persistence file",
+                exc,
                 details={
                     "model": meta.get("model"),
                     "kind": kind,

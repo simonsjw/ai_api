@@ -20,28 +20,14 @@ is factored into three cohesive, atomic modules:
 
 These three backends are **polymorphic** via the shared ``PersistenceBackend``
 interface defined in ``persistence.py``.  The parent ``PersistenceManager``
-compares and contrasts them at construction time:
+compares and contrasts them at construction time.
 
-- **Durability & querying**: Only the Postgres backend offers ACID guarantees,
-  rich SQL analytics, and the recursive CTE machinery needed for ``reconstruct_neutral_branch``.
-  JSON and STDOUT backends return ``None`` for all branching identifiers.
-- **Branching model**: Postgres alone supports the four relational columns
-  (``tree_id``, ``branch_id``, ``parent_response_id``, ``sequence``) and the
-  rebase/edit operations that make conversational history editable like Git.
-  The other two backends are intentionally stateless with respect to conversation
-  graphs.
-- **Operational profile**: Postgres requires a running database and connection
-  pool (py_pgkit or asyncpg).  JSON writes are local filesystem only.  STDOUT
-  has zero external dependencies and zero latency beyond a ``print()``.
-- **Use-case alignment**: Choose Postgres when you need auditability, branching,
-  or production multi-user chat.  Choose JSON for offline reproducibility or
-  simple logging.  Choose STDOUT when the only consumer is a human watching the
-  terminal (the modern equivalent of the original ``save_mode="none"``).
+**Error handling (updated 2026)**
 
-All three modules follow an identical documentation template (numpy/scipy style)
-so that developers can read any one of them and immediately understand the
-others by analogy.
-
+All database-related exceptions are now routed through the single generic
+``wrap_error(DatabasePersistenceError, ...)`` (or ``PersistenceError`` for
+pool-level failures).  This guarantees consistent typing, structured details,
+and centralised logging.
 """
 
 from __future__ import annotations
@@ -57,7 +43,7 @@ import py_pgkit as pgk
 from py_pgkit.db import PgSettings
 from py_pgkit.db import get_pool as get_pgk_pool
 
-from ..errors import wrap_persistence_error
+from ..errors import wrap_error, DatabasePersistenceError, PersistenceError
 
 __all__ = ["PostgresPersistenceBackend"]
 
@@ -135,7 +121,8 @@ class PostgresPersistenceBackend:
 
         Prefers the py_pgkit shared pool when ``settings`` is supplied;
         falls back to a private ``asyncpg`` pool for legacy ``db_url`` usage.
-        Any failure is wrapped as ``DatabasePersistenceError`` and logged.
+        Any failure is wrapped as ``PersistenceError`` (pool-level) via the
+        single generic ``wrap_error`` factory and logged.
         """
         try:
             if self.settings is not None:
@@ -148,9 +135,10 @@ class PostgresPersistenceBackend:
                 )
             return self._pool
         except Exception as exc:
-            err = wrap_persistence_error(
-                exc,
+            err = wrap_error(
+                PersistenceError,
                 "Failed to obtain PostgreSQL connection pool",
+                exc,
                 details={
                     "db_url": bool(self.db_url),
                     "has_settings": self.settings is not None,
@@ -177,8 +165,9 @@ class PostgresPersistenceBackend:
         and performs a single-row INSERT using a prepared statement that
         exactly matches the schema produced by ``db_responses_schema.py``.
 
-        All database errors are caught, wrapped as ``DatabasePersistenceError``,
-        logged at WARNING level (callers typically continue), and re-raised.
+        All database errors are caught and wrapped via the single generic
+        ``wrap_error(DatabasePersistenceError, ...)`` so that the raised
+        exception is always of the precise custom type with full context.
 
         Parameters
         ----------
@@ -206,7 +195,7 @@ class PostgresPersistenceBackend:
         ------
         DatabasePersistenceError
             Any database error (connection loss, constraint violation, …)
-            wrapped with structured details.
+            wrapped via ``wrap_error`` with structured details.
 
         See Also
         --------
@@ -248,9 +237,10 @@ class PostgresPersistenceBackend:
                 "kind": kind,
             }
         except Exception as exc:
-            err = wrap_persistence_error(
-                exc,
+            err = wrap_error(
+                DatabasePersistenceError,
                 "Failed to persist chat turn to PostgreSQL",
+                exc,
                 details={
                     "model": meta.get("model"),
                     "kind": kind,
@@ -300,9 +290,10 @@ class PostgresPersistenceBackend:
                     sequence,
                 )
         except Exception as exc:
-            err = wrap_persistence_error(
-                exc,
+            err = wrap_error(
+                DatabasePersistenceError,
                 "PostgreSQL INSERT failed",
+                exc,
                 details={"tree_id": str(tree_id), "kind": meta.get("kind")},
                 logger=self.logger,
                 level=logging.ERROR,
@@ -325,7 +316,8 @@ class PostgresPersistenceBackend:
         ``parent_response_id`` links in a single round-trip and returns the
         neutral turns in chronological order.
 
-        Any query error is wrapped as ``DatabasePersistenceError`` and logged.
+        Any query error is wrapped via the single generic ``wrap_error`` as
+        ``DatabasePersistenceError`` and logged at ERROR level.
 
         Parameters
         ----------
@@ -399,9 +391,10 @@ class PostgresPersistenceBackend:
                 history.append(neutral_turn)
             return history
         except Exception as exc:
-            err = wrap_persistence_error(
-                exc,
+            err = wrap_error(
+                DatabasePersistenceError,
                 "Failed to reconstruct neutral branch",
+                exc,
                 details={"tree_id": str(tree_id), "branch_id": str(branch_id)},
                 logger=self.logger,
                 level=logging.ERROR,

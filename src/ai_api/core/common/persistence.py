@@ -10,49 +10,21 @@ modules:
 - ``json.py``     → ``JsonFilePersistenceBackend``
 - ``stdout.py``   → ``StdoutPersistenceBackend``
 
-**Broader design philosophy and how it produces the requirements**
+**Error handling model (updated 2026)**
 
-The driving insight of the ai_api architecture is that a client object is
-uniquely identified by the immutable combination of:
+All low-level exceptions raised by any backend are caught and converted
+using the single generic factory ``wrap_error`` from ``.errors``.  This
+ensures:
 
-1. The model it is bound to (e.g. ``"llama3.2"``, ``"grok-4"``).
-2. The persistence strategy it employs (Postgres, JSON files, or STDOUT).
+- Every error is an instance of the most appropriate custom type
+  (``PersistenceError``, ``DatabasePersistenceError``, ``FilePersistenceError``,
+  or ``OutputPersistenceError``).
+- Structured ``details`` and the original exception (via ``__cause__``) are
+  always preserved.
+- Logging occurs at a consistent point with the exact severity chosen by
+  the caller.
 
-When an application needs to talk to multiple models *or* to persist the same
-model in multiple ways, the recommended pattern is to instantiate **one
-dedicated client class per (model, persistence) pair**.  This has profound
-consequences:
-
-- No runtime ``if save_mode == "..."`` switches inside request objects or
-  client methods.
-- The storage methodology and model details are completely abstracted away
-  from the call site.
-- Developer attention is forced back onto the *prompt* and *agent*
-  interactions — exactly where it belongs.
-
-To realise this vision we apply two core principles:
-
-**Principle 1 — Cohesive, atomic modules**
-Each persistence strategy is a self-contained atom (one primary class +
-minimal helpers) that can be understood, tested, and swapped in isolation.
-Hence the three files ``database.py``, ``json.py``, and ``stdout.py``.
-
-**Principle 2 — High-verbosity, uniform documentation**
-Every public class follows the same numpy/scipy template (Parameters,
-Returns, Raises, See Also, Notes, Examples).  The parent module
-(``persistence.py``) then adds an explicit **Comparison of Persistence
-Strategies** section so that a developer can read any one module and
-instantly understand the trade-offs of the others.
-
-The result is a persistence layer that is:
-
-- **Pluggable at construction time** (the strategy is chosen once when the
-  ``PersistenceManager`` — and therefore the client — is wired).
-- **Free of legacy compatibility shims** (no ``save_mode`` routing, no
-  deprecated batch helpers).
-- **Focused on the single responsibility** of turning a provider response
-  into durable/ephemeral output while returning a uniform metadata dict.
-
+This replaces all previous thin ``wrap_persistence_error`` helpers.
 """
 
 from __future__ import annotations
@@ -71,7 +43,7 @@ from ai_api.data_structures.base_objects import (
     NeutralTurn,
 )
 
-from .errors import wrap_persistence_error
+from .errors import wrap_error, PersistenceError
 from .persistence_methods.database import PostgresPersistenceBackend
 from .persistence_methods.json import JsonFilePersistenceBackend
 from .persistence_methods.stdout import StdoutPersistenceBackend
@@ -259,9 +231,9 @@ class PersistenceManager:
         Consequently, the caller never needs to know whether the output went to
         Postgres, a JSON file, or the console.
 
-        Any exception raised by the backend is wrapped as ``PersistenceError``
-        (with structured details) and logged at WARNING level before being
-        re-raised so that callers can decide whether to continue.
+        Any exception raised by the backend is wrapped via the single generic
+        ``wrap_error(PersistenceError, ...)`` so that every error carries the
+        correct custom type, structured details, and is logged exactly once.
 
         Parameters
         ----------
@@ -290,7 +262,8 @@ class PersistenceManager:
         Raises
         ------
         PersistenceError
-            Any error from the backend, wrapped with ``message`` and ``details``.
+            Any error from the backend, wrapped with ``message`` and ``details``
+            via the generic ``wrap_error`` factory.
 
         See Also
         --------
@@ -379,7 +352,7 @@ class PersistenceManager:
             "backend": type(self.backend).__name__,
         }
 
-        # 6. Delegate — wrap any backend error
+        # 6. Delegate — wrap any backend error using the generic factory
         try:
             result = await self.backend.persist(
                 response_blob=response_blob,
@@ -397,9 +370,10 @@ class PersistenceManager:
             )
             return result
         except Exception as exc:
-            err = wrap_persistence_error(
-                exc,
+            err = wrap_error(
+                PersistenceError,
                 "Persistence backend failed",
+                exc,
                 details={
                     "backend": type(self.backend).__name__,
                     "model": meta.get("model"),
