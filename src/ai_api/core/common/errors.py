@@ -1,129 +1,277 @@
 """
-errors.py — Custom exception hierarchy and error-wrapping utilities for the ai_api package.
+Shared generic error hierarchy for the entire ai_api package.
 
-This module provides a small, cohesive set of exception classes used across the
-persistence layer (and potentially other core components).  The design follows
-the principle that every error should carry both a human-readable message and
-structured details that can be logged or surfaced to callers without losing
-the original exception context.
+This module defines a clean, provider-agnostic exception hierarchy rooted at
+``APIError``. It is the single source of truth for error types used by all
+clients (Ollama, xAI, and future providers), the persistence layer, logging
+setup, and cross-cutting concerns.
 
-All errors inherit from ``PersistenceError`` so that client code can catch a
-single base type when it wants to treat persistence failures uniformly (while
-still being able to inspect ``.message`` and ``.details``).
+All wrapping of low-level exceptions should be performed exclusively through
+the generic ``wrap_error`` factory. Thin convenience wrappers have been
+removed in favour of the single, type-safe generic.
 
-The ``wrap_persistence_error`` helper is the canonical way to turn low-level
-exceptions (asyncpg errors, OSError, etc.) into ai_api errors while preserving
-traceback information via exception chaining (``raise ... from exc``).
+Design principles
+-----------------
+- **Single root**: Every exception ultimately inherits from ``APIError``.
+  This allows ``except APIError`` to catch everything while still permitting
+  fine-grained ``except`` clauses.
+- **Shallow taxonomy**: Only truly common categories live here.
+  Provider-specific concerns belong in ``ai_api.core.xai.errors_xai`` and
+  ``ai_api.core.ollama.errors_ollama``.
+- **Wrap-error pattern**: All raw exceptions are converted via the single
+  ``wrap_error(error_cls, message, exc, ...)`` helper. It:
+    1. Instantiates the requested typed error.
+    2. Records ``details={"original": type(exc).__name__}``.
+    3. Attaches the original via ``__cause__`` (full traceback preserved).
+- **Logging is centralised** inside ``wrap_error`` for consistency.
+- **Direct imports only**: Consumers import from the module where the class
+  is defined.
 
+See Also
+--------
+ai_api.core.xai.errors_xai : xAI-specific extensions (auth, rate limits,
+    gRPC, thinking mode, multimodal, cache, batch, structured output).
+ai_api.core.ollama.errors_ollama : Ollama-specific extensions (GPU/memory
+    warnings, local server connection issues).
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Type, TypeVar
 
 __all__ = [
+    # Root
+    "APIError",
+    # Logger
+    "LoggerError",
+    "LoggerInitializationError",
+    # Persistence (shared across backends)
     "PersistenceError",
+    "PersistenceSettingsError",
+    "PersistencePoolError",
     "DatabasePersistenceError",
     "FilePersistenceError",
     "OutputPersistenceError",
-    "wrap_persistence_error",
+    # Database / Postgres
+    "DatabaseError",
+    "DatabaseConnectionError",
+    "DatabaseQueryError",
+    # Generic client errors
+    "ClientError",
+    # Single generic wrapper (the only public way to create + log errors)
+    "wrap_error",
 ]
 
 
-@dataclass
-class PersistenceError(Exception):
-    """Base exception for all persistence-related failures.
+# ----------------------------------------------------------------------
+# 1. Root of the hierarchy
+# ----------------------------------------------------------------------
+class APIError(Exception):
+    """Root of the entire ai_api error hierarchy.
+
+    All other exceptions inherit from this class (directly or indirectly).
+    Every instance carries a human-readable ``message`` and an optional
+    ``details`` dictionary suitable for structured logging, metrics, or
+    API error responses.
+
+    Parameters
+    ----------
+    message : str
+        Human-readable description of the error.
+    details : dict[str, Any] or None, optional
+        Structured context (e.g. ``{"model": "grok-4", "request_id": "..."}``).
+        Must never contain secrets. Defaults to empty dict.
 
     Attributes
     ----------
     message : str
-        Human-readable description of what went wrong.
-    details : dict
-        Structured context (model name, kind, backend, original error, …)
-        intended for logging or telemetry.  Never contains secrets.
+    details : dict[str, Any]
     """
 
-    message: str
-    details: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        self.message = message
+        self.details = details or {}
         super().__init__(self.message)
 
+    def __str__(self) -> str:
+        return f"{self.__class__.__name__}: {self.message}"
 
-@dataclass
-class DatabasePersistenceError(PersistenceError):
-    """Raised when a PostgreSQL operation fails (connection, insert, query, …)."""
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(message={self.message!r}, details={self.details})"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serialisable representation (useful for API responses)."""
+        return {
+            "error": self.__class__.__name__,
+            "message": self.message,
+            "details": self.details,
+        }
+
+
+# ----------------------------------------------------------------------
+# 2. Logger errors
+# ----------------------------------------------------------------------
+class LoggerError(APIError):
+    """Errors originating from the logging subsystem (structlog, handlers, config)."""
 
     pass
 
 
-@dataclass
+class LoggerInitializationError(LoggerError):
+    """Logger could not be initialised (missing handlers, invalid config, etc.)."""
+
+    pass
+
+
+# ----------------------------------------------------------------------
+# 3. Persistence errors (shared across file, DB, stdout, settings)
+# ----------------------------------------------------------------------
+class PersistenceError(APIError):
+    """Base exception for all persistence-related failures.
+
+    Covers PostgreSQL, filesystem JSON output, stdout, connection pools,
+    and settings resolution. Subclasses exist for more specific diagnosis.
+    """
+
+    pass
+
+
+class PersistenceSettingsError(PersistenceError):
+    """Settings resolution or validation failed (bad ``db_url``, missing ``json_dir``, etc.)."""
+
+    pass
+
+
+class PersistencePoolError(PersistenceError):
+    """Failed to acquire or maintain a connection pool to Postgres."""
+
+    pass
+
+
+class DatabasePersistenceError(PersistenceError):
+    """Raised when a PostgreSQL operation fails inside the persistence abstraction
+    (connection, insert, query, …). Use ``DatabaseError`` for low-level SQL errors.
+    """
+
+    pass
+
+
 class FilePersistenceError(PersistenceError):
     """Raised when a filesystem operation fails (JSON write, directory creation, …)."""
 
     pass
 
 
-@dataclass
 class OutputPersistenceError(PersistenceError):
     """Raised when an output operation fails (stdout write, flush, …)."""
 
     pass
 
 
-def wrap_persistence_error(
-    exc: Exception,
+# ----------------------------------------------------------------------
+# 4. Database / Postgres errors (low-level SQL)
+# ----------------------------------------------------------------------
+class DatabaseError(APIError):
+    """Errors from PostgreSQL / asyncpg operations.
+
+    Distinct from ``PersistenceError`` so that callers can catch "any DB problem"
+    versus "any persistence problem".
+    """
+
+    pass
+
+
+class DatabaseConnectionError(DatabaseError):
+    """Failed to connect to or acquire a connection from Postgres."""
+
+    pass
+
+
+class DatabaseQueryError(DatabaseError):
+    """SQL execution error (syntax, constraint violation, timeout, etc.)."""
+
+    pass
+
+
+# ----------------------------------------------------------------------
+# 5. Generic client errors
+# ----------------------------------------------------------------------
+class ClientError(APIError):
+    """Internal errors within any ai_api client (validation, state machine, usage).
+
+    Provider-specific client errors should inherit from both their provider root
+    *and* this class (multiple inheritance) so that ``except ClientError`` catches
+    all internal client failures regardless of provider.
+    """
+
+    pass
+
+
+# ----------------------------------------------------------------------
+# 6. Generic wrapper (the single place logging + wrapping happens)
+# ----------------------------------------------------------------------
+_APIErrorT = TypeVar("_APIErrorT", bound=APIError)
+
+
+def wrap_error(
+    error_cls: Type[_APIErrorT],
     message: str,
+    exc: Exception | None = None,
     *,
     details: dict[str, Any] | None = None,
     logger: logging.Logger | None = None,
     level: int = logging.ERROR,
-) -> PersistenceError:
-    """Wrap a low-level exception into a ``PersistenceError`` (or subclass) and log it.
+) -> _APIErrorT:
+    """Wrap any exception into the requested ``APIError`` subclass and log it.
 
-    This is the **recommended** way to handle unexpected errors inside backend
-    implementations.  It:
+    This is the **only** public factory for creating and logging errors in the
+    entire package. All previous thin convenience wrappers have been removed
+    in favour of this single, fully generic, statically typed helper.
 
-    1. Creates a ``PersistenceError`` (or more specific subclass if you pass one
-       via the ``error_class`` kwarg — currently not exposed for simplicity).
-    2. Attaches the original exception as ``__cause__`` (Python's exception
-       chaining).
-    3. Logs the message at the requested level with the structured ``details``
-       and the stringified original error.
-    4. Returns the wrapped error so the caller can decide whether to raise it
-       or swallow it (as the higher-level clients currently do).
+    It guarantees:
+
+    - Structured ``details`` (including original exception type)
+    - Exception chaining via ``__cause__``
+    - Centralised logging (easy to change format, add correlation IDs, switch
+      to structlog, etc.)
+
+    The ``TypeVar`` bound ensures static type checkers correctly infer the
+    return type from the ``error_cls`` argument.
 
     Parameters
     ----------
-    exc : Exception
-        The original exception that was caught.
+    error_cls : Type[_APIErrorT]
+        The concrete error class to instantiate (e.g. ``PersistenceError``,
+        ``DatabaseQueryError``, ``XAIClientError``, ``OllamaGPUError``).
     message : str
-        Human-readable summary (e.g. "Failed to insert response into Postgres").
+        Human-readable summary of what failed.
+    exc : Exception or None, optional
+        The original low-level exception (if any). Will be attached as ``__cause__``.
     details : dict, optional
-        Extra context to include in the error and the log record.
+        Extra context to merge into the error's ``details``.
     logger : logging.Logger, optional
-        Logger to use.  If ``None`` a module-level logger is created.
+        Logger to use. If ``None``, a module-level logger is created.
     level : int, default logging.ERROR
-        Log level.  Use ``logging.WARNING`` for non-fatal cases that the
-        caller will continue past.
+        Log level. Use ``logging.WARNING`` for recoverable cases.
 
     Returns
     -------
-    PersistenceError
-        The wrapped error (already logged).
+    _APIErrorT
+        The wrapped (and already logged) exception instance — statically typed
+        as the exact class you requested.
 
     Examples
     --------
+    >>> from ai_api.core.xai.errors_xai import XAIClientError
     >>> try:
-    ...     await conn.execute(...)
-    ... except asyncpg.PostgresError as e:
-    ...     err = wrap_persistence_error(
+    ...     await client.chat(...)
+    ... except Exception as e:
+    ...     err = wrap_error(
+    ...         XAIClientError,
+    ...         "Failed to create chat session with xAI",
     ...         e,
-    ...         "Failed to persist chat turn",
-    ...         details={"model": model, "kind": kind},
-    ...         logger=self.logger,
+    ...         details={"model": "grok-4", "request_id": rid},
     ...         level=logging.WARNING,
     ...     )
     ...     raise err from e
@@ -132,13 +280,17 @@ def wrap_persistence_error(
         logger = logging.getLogger(__name__)
 
     details = details or {}
-    details.setdefault("original_error_type", type(exc).__name__)
-    details.setdefault("original_error", str(exc))
+    if exc is not None:
+        details.setdefault("original", type(exc).__name__)
+        details.setdefault("original_error", str(exc))
 
-    error = PersistenceError(message=message, details=details)
+    wrapped = error_cls(message, details=details)
+    if exc is not None:
+        wrapped.__cause__ = exc
+
     logger.log(
         level,
         message,
-        extra={"error": str(exc), "details": details},
+        extra={"error_type": error_cls.__name__, "details": details},
     )
-    return error
+    return wrapped

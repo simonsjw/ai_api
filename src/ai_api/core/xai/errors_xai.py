@@ -1,186 +1,155 @@
 """
-xAI-Specific Error Hierarchy (Full Backward Compatibility)
+xAI-Specific Error Hierarchy
 
-This module defines the complete xAI error taxonomy while preserving every
-public name from earlier versions of the library. It delegates generic
-behaviour to ``core/common/errors.py`` and adds xAI-specific subclasses
-for gRPC, rate limiting, thinking mode, multimodal, caching, batch failures,
-and structured output parsing errors.
+This module defines xAI-specific error classes that inherit from the shared
+base classes in ``ai_api.core.common.errors``.
 
-Design Goals
-------------
-- Consistent with ``ollama/errors_ollama.py`` and the shared base classes.
-- No changes required for the new Git-style branching features (errors are
-  orthogonal to conversation metadata).
+All xAI errors ultimately inherit from ``APIError``, so a single
+``except APIError`` catches everything. Provider-specific catching remains
+possible via ``except XAIError`` or ``except XAIClientError``.
 
-New in 2026
------------
-- ``xAIStructuredOutputError``: Raised when ``response_model`` validation fails
-  after a successful xAI API response. This replaces the previous "log and
-  continue with raw text" behaviour for stricter, typed error handling.
+**Usage of the generic wrapper**
+
+All error creation and logging should use the single generic factory:
+
+    from ai_api.core.common.errors import wrap_error
+    from .errors_xai import XAIClientError, XAIRateLimitError
+
+    err = wrap_error(
+        XAIClientError,
+        "Failed to call xAI chat endpoint",
+        exc,
+        details={"model": model, "request_id": request_id},
+    )
+    raise err from exc
+
+This replaces all previous thin ``wrap_xai_*`` helpers.
+
+Provider-specific concerns covered here
+---------------------------------------
+- Authentication and API key issues
+- Rate limiting (with retry-after information)
+- gRPC / streaming connection errors
+- Thinking mode, multimodal, caching, batch, and structured output failures
 
 See Also
 --------
-ai_api.core.common.errors
-ai_api.core.ollama.errors_ollama
+ai_api.core.common.errors : Shared base classes and the generic ``wrap_error``.
+ai_api.core.ollama.errors_ollama : Equivalent module for the Ollama provider.
 """
 
 try:
     import grpc
 except ImportError:
-    grpc = None                                                                           # type: ignore[assignment]
+    grpc = None  # type: ignore[assignment]
 
-# NEW: import shared generic base
-from ..common.errors import (
-    AIAPIError,
-    AIClientError,
-    AIDatabaseConnectionError,
-    AIDatabaseError,
-    AIDatabaseQueryError,
-    AILoggerError,
-    AILoggerInitializationError,
-)
 
-__all__: list[str] = [
-    # Base (kept for backward compatibility)
-    "xAIError",
-    # Logger (re-export original names)
-    "xAILoggerError",
-    "xAILoggerInitializationError",
-    # Database
-    "xAIPostgresError",
-    "xAIPostgresConnectionError",
-    "xAIPostgresQueryError",
-    # xAI API / gRPC
-    "xAIAPIError",
-    "xAIAPIConnectionError",
-    "xAIAPIAuthenticationError",
-    "xAIAPIInvalidRequestError",
-    "xAIAPIRateLimitError",
-    # Client
-    "xAIClientError",
+from ..common.errors import APIError, ClientError
+
+
+__all__ = [
+    "XAIError",
+    "XAIClientError",
+    "XAIRateLimitError",
+    "XAIAuthError",
+    "XAIAPIConnectionError",
+    "XAIAPIInvalidRequestError",
     "UnsupportedThinkingModeError",
-    "xAIClientBatchError",
-    "xAIClientMultimodalError",
-    "xAIClientCacheError",
-    "xAIStructuredOutputError",                                                           # NEW
-    # Wrappers (kept exactly as before)
-    "wrap_xai_api_error",
+    "XAIClientBatchError",
+    "XAIClientMultimodalError",
+    "XAIClientCacheError",
+    "XAIStructuredOutputError",
 ]
 
 
-# Alias the generic base to the old xAI name (100 % backward compatible)
-xAIError = AIAPIError
+class XAIError(APIError):
+    """Base class for all xAI-specific errors.
 
-# Logger – re-export with original xAI names
-xAILoggerError = AILoggerError
-xAILoggerInitializationError = AILoggerInitializationError
+    All xAI errors inherit from this class (and ultimately from ``APIError``).
+    """
 
-# Database – re-export with original xAI names
-xAIPostgresError = AIDatabaseError
-xAIPostgresConnectionError = AIDatabaseConnectionError
-xAIPostgresQueryError = AIDatabaseQueryError
+    pass
 
 
-# xAI-specific API errors (these stay in this file)
-class xAIAPIError(AIAPIError):
-    """Errors returned by the official xAI API / gRPC."""
+class XAIClientError(ClientError, XAIError):
+    """Internal client errors for the xAI provider (validation, state machine,
+    request building, response parsing, etc.).
+
+    Multiple inheritance allows catching with either ``except ClientError``
+    (all providers) or ``except XAIClientError`` (xAI only).
+    """
+
+    pass
+
+
+class XAIRateLimitError(XAIError):
+    """xAI rate limit exceeded.
+
+    The ``details`` dict typically contains ``retry_after`` (seconds) when
+    available from the API response.
+    """
+
+    pass
+
+
+class XAIAuthError(XAIError):
+    """Authentication or API-key related failure with the xAI service."""
 
     pass
 
 
 if grpc is not None:
 
-    class xAIAPIConnectionError(xAIAPIError, grpc.RpcError):
-        pass
+    class XAIAPIConnectionError(XAIError, grpc.RpcError):
+        """gRPC connection or streaming error while talking to xAI."""
 
-    class xAIAPIAuthenticationError(xAIAPIError, grpc.RpcError):
         pass
 else:
 
-    class xAIAPIConnectionError(xAIAPIError):
+    class XAIAPIConnectionError(XAIError):
+        """gRPC connection or streaming error while talking to xAI
+        (fallback when grpc is not installed).
+        """
+
         pass
 
-    class xAIAPIAuthenticationError(xAIAPIError):
-        pass
 
-
-class xAIAPIInvalidRequestError(xAIAPIError):
-    pass
-
-
-class xAIAPIRateLimitError(xAIAPIError):
-    pass
-
-
-# xAI-specific client errors
-class xAIClientError(AIClientError):
-    """Internal xAIClient errors (validation, state, usage)."""
+class XAIAPIInvalidRequestError(XAIError):
+    """The request sent to xAI was rejected as invalid (bad parameters, etc.)."""
 
     pass
 
 
-class UnsupportedThinkingModeError(xAIClientError):
+class UnsupportedThinkingModeError(XAIClientError):
     """Requested thinking mode is not supported by the current model or SDK version."""
 
     pass
 
 
-class xAIClientBatchError(xAIClientError):
+class XAIClientBatchError(XAIClientError):
     """Error specific to batch processing (e.g. mismatched response_model list length)."""
 
     pass
 
 
-class xAIClientMultimodalError(xAIClientError):
+class XAIClientMultimodalError(XAIClientError):
     """Error related to multimodal (image/video) input handling."""
 
     pass
 
 
-class xAIClientCacheError(xAIClientError):
+class XAIClientCacheError(XAIClientError):
     """Error related to prompt caching or context caching features."""
 
     pass
 
 
-class xAIStructuredOutputError(xAIClientError):
-    """Pydantic validation of the model response against response_model failed.
+class XAIStructuredOutputError(XAIClientError):
+    """Pydantic validation of the model response against ``response_model`` failed.
 
-    **Default behaviour**: The library logs a rich WARNING and returns the
-    response with raw ``.text`` (``.parsed`` is left unset). This follows the
-    "best-effort / continue on non-fatal issues" contract used for persistence
-    errors and matches common LLM client behaviour (OpenAI, Anthropic, etc.).
-
-    The exception class is provided so that:
-    - Advanced callers can `except xAIStructuredOutputError` if they care.
-    - A future `strict_structured_output=True` flag can be added without
-      introducing a new exception type.
-
-    The original Pydantic ``ValidationError`` is preserved as ``__cause__``.
+    This exception is raised (or can be caught) when strict structured output
+    validation is enabled. The original Pydantic ``ValidationError`` is
+    preserved as ``__cause__``.
     """
 
     pass
-
-
-# Wrapper aliase (kept exactly as before)
-
-
-def wrap_xai_api_error(exc: Exception, message: str) -> xAIAPIError:
-    """Wrap any xAI SDK / gRPC exception.
-
-    Parameters
-    ----------
-    exc : Exception
-        The original exception (often a gRPC or httpx error).
-    message : str
-        Contextual message describing the operation that failed.
-
-    Returns
-    -------
-    xAIAPIError
-        Properly typed exception with ``__cause__`` and ``details``.
-    """
-    wrapped = xAIAPIError(message, details={"original": type(exc).__name__})
-    wrapped.__cause__ = exc
-    return wrapped
