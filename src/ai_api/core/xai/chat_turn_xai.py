@@ -20,11 +20,10 @@ Key responsibilities
 
 Error Handling (High Standard – Refactored)
 -------------------------------------------
-All xAI SDK calls are wrapped with ``wrap_xai_api_error`` (imported from
-``errors_xai.py``). This produces a typed ``xAIAPIError`` subclass with
-full ``__cause__`` chaining and contextual ``details``. HTTP / gRPC errors
-from the underlying SDK are therefore uniformly surfaced as
-``xAIAPIError`` (or more specific subclasses when available). Persistence
+All xAI SDK calls are wrapped with ``wrap_error`` (from ``common/errors.py``)
+using ``XAIError`` / ``XAIClientError`` etc. This produces a typed subclass
+with full ``__cause__`` chaining and contextual ``details``. HTTP / gRPC errors
+are uniformly surfaced as ``XAIError`` (or more specific). Persistence
 errors remain non-fatal (logged at WARNING) to preserve the "continue on
 storage failure" contract used everywhere in the library.
 
@@ -43,7 +42,7 @@ ai_api.core.common.persistence.PersistenceManager.persist_chat_turn
 ai_api.core.xai.chat_stream_xai
 ai_api.core.xai.chat_batch_xai
 ai_api.core.ollama.chat_turn_ollama
-ai_api.core.xai.errors_xai (wrap_xai_api_error, xAIAPIError, xAIAPIConnectionError, ...)
+ai_api.core.xai.errors_xai (XAIError, XAIClientError, XAIStructuredOutputError, ...)
 """
 
 import logging
@@ -51,9 +50,11 @@ from typing import Any, Type
 
 from pydantic import BaseModel
 
+from ...data_structures.base_objects import SaveMode
 from ...data_structures.xai_objects import xAIRequest, xAIResponse
+from ..common.errors import PersistenceError, wrap_error
 from ..common.response_struct import create_json_response_spec
-from .errors_xai import wrap_xai_api_error, xAIStructuredOutputError
+from .errors_xai import XAIError, XAIStructuredOutputError
 
 __all__: list[str] = ["create_turn_chat_session"]
 
@@ -66,7 +67,7 @@ async def create_turn_chat_session(
     *,
     temperature: float | None = None,
     max_tokens: int | None = None,
-    save_mode: str = "none",
+    save_mode: SaveMode = SaveMode.NONE,
     response_model: Type[BaseModel] | None = None,
     strict_structured_output: bool = False,
     **kwargs: Any,
@@ -94,13 +95,13 @@ async def create_turn_chat_session(
         Sampling temperature.
     max_tokens : int or None, optional
         Maximum tokens to generate.
-    save_mode : {"none", "json_files", "postgres"}, default "none"
+    save_mode : SaveMode, default SaveMode.NONE
         Persistence backend.
     response_model : type[BaseModel] or None, optional
         Pydantic model for structured output. Converted internally via
         ``create_json_response_spec``.
     strict_structured_output : bool, default False
-        If True and ``response_model`` is supplied, raise ``xAIStructuredOutputError``
+        If True and ``response_model`` is supplied, raise ``XAIStructuredOutputError``
         on Pydantic validation failure instead of logging a warning and continuing
         with raw text. Useful for pipelines that require guaranteed parsed objects.
     **kwargs : Any
@@ -119,13 +120,13 @@ async def create_turn_chat_session(
 
     Raises
     ------
-    xAIAPIError
+    XAIError
         Any failure during the xAI SDK chat completion call is wrapped
-        using ``wrap_xai_api_error``. This includes authentication errors,
+        using ``wrap_error``. This includes authentication errors,
         rate-limit errors, invalid requests, connection failures, and
         generic SDK exceptions. The original exception is preserved in
         ``__cause__``.
-    xAIStructuredOutputError
+    XAIStructuredOutputError
         Only raised when ``strict_structured_output=True`` and Pydantic
         validation of ``response.text`` fails. The raw response is still
         attached to the exception's ``__cause__``. Persistence failures
@@ -176,8 +177,10 @@ async def create_turn_chat_session(
             "xAI SDK chat completion failed",
             extra={"model": model, "error_type": type(exc).__name__},
         )
-        raise wrap_xai_api_error(
-            exc, f"Failed to obtain chat completion from xAI (model={model})"
+        raise wrap_error(
+            XAIError,
+            f"Failed to obtain chat completion from xAI (model={model})",
+            exc,
         ) from exc
 
     # 4. Validate the response if a response specification is provided.
@@ -192,9 +195,11 @@ async def create_turn_chat_session(
             response.parsed = parsed
         except Exception as exc:
             if strict_structured_output:
-                raise xAIStructuredOutputError(
+                raise wrap_error(
+                    XAIStructuredOutputError,
                     f"Failed to parse structured response for model '{model}' "
                     "(strict mode enabled)",
+                    exc,
                     details={"original": type(exc).__name__},
                 ) from exc
             else:
@@ -210,7 +215,7 @@ async def create_turn_chat_session(
                 # best-effort: return raw response (parsed left unset)
 
     # 5. Persist via unified entry point (handles request + response + branching)
-    if save_mode != "none" and client.persistence_manager is not None:
+    if save_mode is not SaveMode.NONE and client.persistence_manager is not None:
         try:
             await client.persistence_manager.persist_chat_turn(
                 provider_response=response,
@@ -229,8 +234,14 @@ async def create_turn_chat_session(
                 },
             )
         except Exception as exc:
-            logger.warning(
+            wrapped = wrap_error(
+                PersistenceError,
                 "Persistence via persist_chat_turn failed (continuing gracefully)",
+                exc,
+                level=logging.WARNING,
+            )
+            logger.warning(
+                wrapped.message,
                 extra={"error": str(exc), "model": model},
             )
 
