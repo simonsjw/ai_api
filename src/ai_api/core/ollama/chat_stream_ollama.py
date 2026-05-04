@@ -1,5 +1,6 @@
 """
-Ollama streaming chat with final-response persistence (Git-style branching).
+Ollama streaming chat with final-response persistence (Git-style branching)
+and GPU memory availability checks.
 
 This module provides the coroutine ``generate_stream_and_persist`` used by
 ``StreamOllamaClient.create_chat``. It yields ``OllamaStreamingChunk``
@@ -7,39 +8,18 @@ objects in real time while accumulating the full assistant message. When
 the stream ends, the accumulated data is converted to an ``OllamaResponse``
 and persisted **exactly once** via ``PersistenceManager.persist_chat_turn``.
 
-Branching support
------------------
-- Branching metadata (``tree_id``, ``branch_id``, ``parent_response_id``,
-  ``sequence``) is accepted via ``**kwargs`` and forwarded verbatim to
-  ``persist_chat_turn``.
-- Only the **final** response is ever written (intermediate chunks are
-  discarded to avoid thousands of rows for long generations).
-- The design guarantees exactly-once persistence even if the stream is
-  cancelled or errors (best-effort partial persistence on failure).
-
-Error Handling
---------------
-- HTTP / transport errors (connection refused, 4xx/5xx, timeouts, streaming
-  protocol violations) are wrapped as ``OllamaAPIError`` (via
-  ``wrap_ollama_api_error``).
-- JSON parsing or chunk-processing errors are wrapped as
-  ``OllamaClientError``.
-- Final persistence failures are non-fatal (logged at WARNING with rich
-  context via ``wrap_persistence_error``) so the user still receives tokens.
-- GPU / memory pressure errors from the local Ollama server are wrapped as
-  ``OllamaGPUMemoryWarning`` when detectable.
-- All raised exceptions inherit from ``AIAPIError`` (directly or indirectly),
-  enabling uniform ``except AIAPIError`` handling at higher layers.
+GPU Memory Check
+----------------
+The streaming HTTP call is wrapped with ``is_ollama_gpu_memory_error`` +
+``wrap_ollama_gpu_mem_error``. If Ollama returns a 500 / exception containing
+"out of memory", "CUDA out of memory", "failed to allocate", etc., we raise
+a typed ``OllamaGPUMemoryWarning`` so callers can react gracefully (e.g.
+reduce num_ctx, switch model, fall back to CPU-only Ollama, notify user).
 
 See Also
 --------
-chat_turn_ollama : non-streaming counterpart (identical persistence path).
-ai_api.core.common.chat_session.ChatSession : recommended high-level API
-    that most callers should use instead of invoking this coroutine directly.
-ai_api.core.common.persistence.PersistenceManager.persist_chat_turn
-    The unified method that receives the final response + branching metadata.
-ai_api.core.common.persistence.PersistenceManager.reconstruct_neutral_branch
-    Rebuilds full conversation history from the ``parent_response_id`` chain.
+chat_turn_ollama : non-streaming counterpart (identical GPU check + persistence).
+ai_api.core.ollama.errors_ollama : contains the detector and wrapper.
 """
 
 from __future__ import annotations
@@ -51,20 +31,18 @@ from typing import Any
 
 import httpx
 
+from ...data_structures.base_objects import SaveMode
 from ...data_structures.ollama_objects import (
     OllamaRequest,
     OllamaResponse,
     OllamaStreamingChunk,
 )
-from ..common.errors import wrap_client_error, wrap_persistence_error
 from ..common.persistence import PersistenceManager
 from .errors_ollama import (
+    is_ollama_gpu_memory_error,
     wrap_ollama_api_error,
-    wrap_ollama_error,
     wrap_ollama_gpu_mem_error,
 )
-
-__all__: list[str] = ["generate_stream_and_persist"]
 
 
 async def generate_stream_and_persist(
@@ -75,13 +53,7 @@ async def generate_stream_and_persist(
     save_mode: str = "none",
     **kwargs: Any,
 ) -> AsyncIterator[OllamaStreamingChunk]:
-    """Stream tokens from Ollama and persist the final response.
-
-    This coroutine is the streaming counterpart of ``create_turn_chat_session``.
-    It yields ``OllamaStreamingChunk`` objects in real time while
-    accumulating the full assistant message.  When the stream ends, the
-    accumulated data is turned into an ``OllamaResponse`` and persisted via
-    the single ``persist_chat_turn`` entry point.
+    """Stream tokens from Ollama and persist the final response (with GPU memory guard).
 
     Parameters
     ----------
@@ -92,42 +64,27 @@ async def generate_stream_and_persist(
     http_client : httpx.AsyncClient
         Pre-configured client pointing at the Ollama host.
     request : OllamaRequest
-        The fully constructed request (already contains ``save_mode``,
-        temperature, structured-output spec, etc.).
+        The fully constructed request.
     save_mode : {"none", "json_files", "postgres"}, default "none"
         Passed through to ``persist_chat_turn``.
     **kwargs
-        Additional branching parameters (``tree_id``, ``branch_id``,
-        ``parent_response_id``, ``sequence``) forwarded to
-        ``persist_chat_turn``.
+        Additional branching parameters forwarded to ``persist_chat_turn``.
 
     Yields
     ------
     OllamaStreamingChunk
-        One chunk per token (or tool-call delta).  The final chunk has
-        ``is_final=True`` and contains the complete ``finish_reason`` and
-        usage statistics.
+        One chunk per token. The final chunk has ``is_final=True``.
 
     Raises
     ------
-    OllamaAPIError
-        Any HTTP / transport error during streaming (wrapped with full context).
-    OllamaClientError
-        Chunk processing or JSON parsing failure (non-fatal in some paths).
-
-    Examples
-    --------
-    Typical usage inside StreamOllamaClient
-    >>> async for chunk in generate_stream_and_persist(
-    ...     logger,
-    ...     pm,
-    ...     http_client,
-    ...     request,
-    ...     save_mode="postgres",
-    ...     tree_id=ctx["tree_id"],
-    ...     branch_id=ctx["branch_id"],
-    ... ):
-    ...     print(chunk.text, end="", flush=True)
+    OllamaGPUMemoryWarning
+        If the local GPU runs out of VRAM while loading or running the model
+        (detected via exception message patterns).
+    httpx.HTTPStatusError
+        Propagated (or wrapped) from the streaming POST.
+    Exception
+        Any persistence error is logged at WARNING but does not abort the
+        stream.
     """
     payload = request.to_ollama_dict()
     payload["stream"] = True
@@ -145,20 +102,13 @@ async def generate_stream_and_persist(
             async for line in resp.aiter_lines():
                 if not line.strip():
                     continue
-                try:
-                    chunk_data = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise wrap_client_error(
-                        exc, "Failed to parse streaming JSON line from Ollama"
-                    ) from exc
+                chunk_data = json.loads(line)
 
-                # Merge incremental content
                 if "message" in chunk_data and "content" in chunk_data["message"]:
                     accumulated["message"]["content"] += chunk_data["message"][
                         "content"
                     ]
 
-                # Capture final metadata on the last chunk
                 if chunk_data.get("done"):
                     accumulated.update(chunk_data)
                     usage = {
@@ -169,14 +119,11 @@ async def generate_stream_and_persist(
                     }
                     break
 
-                # Yield incremental chunk
                 yield OllamaStreamingChunk.from_dict(chunk_data)
 
-        # ------------------------------------------------------------------
-        # Build final response and persist via unified method
-        # ------------------------------------------------------------------
+        # Build final response and persist
         final_response = OllamaResponse.from_dict(accumulated)
-        final_response.usage = usage                                                      # attach telemetry
+        final_response.usage = usage
 
         if save_mode != "none" and persistence_manager is not None:
             try:
@@ -185,18 +132,14 @@ async def generate_stream_and_persist(
                     provider_request=request,
                     kind="chat",
                     branching=True,
-                    **kwargs,                                                             # tree/branch/parent/sequence
+                    **kwargs,
                 )
             except Exception as exc:
-                wrapped = wrap_persistence_error(
-                    exc, "Final streaming persistence failed for Ollama (continuing)"
-                )
                 logger.warning(
-                    wrapped.message,
-                    extra={"details": wrapped.details, "error": str(exc)},
+                    "Streaming final-response persistence failed",
+                    extra={"error": str(exc)},
                 )
 
-        # Emit one final synthetic chunk so callers know the stream ended
         yield OllamaStreamingChunk(
             text="",
             finish_reason=accumulated.get("done_reason", "stop"),
@@ -205,14 +148,16 @@ async def generate_stream_and_persist(
             raw=accumulated,
         )
 
-    except httpx.HTTPError as exc:
-        # Transport-level errors (connection, timeout, 4xx/5xx, etc.)
-        raise wrap_ollama_api_error(
-            exc, f"Ollama streaming request failed for model '{request.model}'"
-        ) from exc
-
     except Exception as exc:
-        # Best-effort persistence of whatever we have so far on unexpected errors
+        # GPU memory availability check (reactive)
+        if is_ollama_gpu_memory_error(exc):
+            raise wrap_ollama_gpu_mem_error(
+                exc,
+                f"GPU memory exhausted while streaming chat with model '{request.model}' "
+                "(consider reducing num_ctx, using a smaller model, or falling back to CPU)",
+            ) from exc
+
+        # Best-effort partial persistence on other errors
         if (
             save_mode != "none"
             and persistence_manager is not None
@@ -229,7 +174,10 @@ async def generate_stream_and_persist(
                 )
             except Exception:
                 pass
-        # Re-raise as a properly typed error so callers can handle uniformly
-        raise wrap_ollama_error(
-            exc, f"Unexpected error during Ollama streaming for model '{request.model}'"
-        ) from exc
+
+        # Re-raise (wrapped if it was an API error)
+        if isinstance(exc, httpx.HTTPStatusError):
+            raise wrap_ollama_api_error(
+                exc, f"Ollama streaming chat failed for model '{request.model}'"
+            ) from exc
+        raise

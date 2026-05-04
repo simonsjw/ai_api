@@ -21,6 +21,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from ai_api.data_structures.base_objects import SaveMode
 from ai_api.data_structures.ollama_objects import OllamaRequest, OllamaResponse
 from ai_api.data_structures.xai_objects import xAIRequest, xAIResponse
 
@@ -52,6 +53,7 @@ class ChatSession:
     async def create_or_continue(
         self,
         new_prompt: str | list[dict],
+        save_mode: SaveMode = SaveMode.POSTGRES,                                          # or SaveMode.NONE for flexibility
         tree_id: uuid.UUID | None = None,
         branch_id: uuid.UUID | None = None,
         parent_response_id: uuid.UUID | None = None,
@@ -73,7 +75,9 @@ class ChatSession:
         metadata = {
             "model": getattr(self.client, "model", "default"),
             **generation_kwargs,
-            "save_mode": "postgres",
+            "save_mode": save_mode.value
+            if isinstance(save_mode, SaveMode)
+            else save_mode,
         }
 
         if provider == "ollama":

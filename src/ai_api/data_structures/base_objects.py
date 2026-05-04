@@ -20,8 +20,8 @@ while the actual branching tree is maintained via the database columns
   provider.
 - Defines ``LLMEndpoint`` as a frozen, validated container for connection
   details (provider name, model, base_url, api_type, etc.).
-- Introduces ``SaveMode`` type alias used across the package for persistence
-  configuration ("none", "json_files", "postgres").
+- Introduces ``SaveMode`` - an enumerated object used across the package for
+  persistence configuration ("none", "json_files", "postgres").
 - Provides neutral-format models so that ``persist_chat_turn`` can store
   only the *delta* (last prompt + generated response) while full history is
   reconstructed on demand via recursive CTE on the parent links.
@@ -106,6 +106,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Literal, Protocol, TypedDict, runtime_checkable
 
 from pydantic import BaseModel, Field
@@ -222,7 +223,39 @@ class LLMStreamingChunkProtocol(Protocol):
     raw: dict[str, Any]
 
 
-SaveMode = Literal["none", "json_files", "postgres"]
+class SaveMode(str, Enum):
+    """Persistence / output mode for every LLM interaction.
+
+    This Enum (str subclass) controls the fate of the model output:
+
+    - ``NONE``: Echo the generated text (or structured payload) to ``sys.stdout``
+      and return the response object to the caller. No persistence.
+    - ``JSON_FILES``: Write a timestamped neutral blob to ``json_dir``.
+    - ``POSTGRES``: Insert into the ``responses`` table (with branching metadata
+      when applicable).
+
+    Because it subclasses ``str``, all existing string comparisons and
+    ``save_mode="none"`` literals continue to work.  The Enum form provides
+    IDE autocompletion, runtime validation via ``SaveMode("postgres")``, and
+    prevents typos.
+
+    Examples
+    --------
+    >>> from ai_api.data_structures.base_objects import SaveMode
+    >>> mode = SaveMode.NONE
+    >>> mode == "none"
+    True
+    >>> SaveMode("json_files")
+    <SaveMode.JSON_FILES: 'json_files'>
+    """
+
+    NONE = "none"
+    JSON_FILES = "json_files"
+    POSTGRES = "postgres"
+
+
+# Keep alias for any code that still uses Literal (will be removed in future)
+SaveModeLiteral = Literal["none", "json_files", "postgres"]
 
 
 def utc_now() -> datetime:

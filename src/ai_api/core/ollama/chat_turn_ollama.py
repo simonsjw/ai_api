@@ -8,6 +8,19 @@ single HTTP POST to Ollama's ``/api/chat`` endpoint, converts the response
 into an ``OllamaResponse``, and persists the interaction **exactly once**
 via the unified ``PersistenceManager.persist_chat_turn`` entry point.
 
+save_mode support
+-----------------
+Every public coroutine now honours ``save_mode`` uniformly:
+
+- ``SaveMode.NONE`` → generated text is echoed to ``sys.stdout`` (new behaviour)
+  and the response object is returned.  No persistence occurs.
+- ``SaveMode.JSON_FILES`` / ``POSTGRES`` → normal persistence path.
+
+The helper ``output_llm_response_to_stdout`` is used when no
+``PersistenceManager`` is attached, guaranteeing that ``save_mode=none``
+**always** produces visible output regardless of how the client was
+instantiated.
+
 GPU Memory Check
 ----------------
 The HTTP call is guarded by ``is_ollama_gpu_memory_error`` + ``wrap_ollama_gpu_mem_error``.
@@ -29,6 +42,7 @@ from typing import Any, Type
 import httpx
 from pydantic import BaseModel
 
+from ...data_structures.base_objects import SaveMode
 from ...data_structures.ollama_objects import (
     OllamaJSONResponseSpec,
     OllamaRequest,
@@ -155,23 +169,22 @@ async def create_turn_chat_session(
                 # best-effort: return raw response (parsed left unset)
 
     # Persistence
-    if save_mode != "none" and client.persistence_manager is not None:
+    if save_mode in (SaveMode.NONE, "none"):
+        # No pm → direct STDOUT (re-uses shared helper)
+        from ..common.persistence import output_llm_response_to_stdout
+
+        output_llm_response_to_stdout(response, getattr(client, "logger", None))
+    elif client.persistence_manager is not None:
         try:
             await client.persistence_manager.persist_chat_turn(
                 provider_response=response,
                 provider_request=request,
                 kind="chat",
                 branching=True,
-                **{
-                    k: v
-                    for k, v in kwargs.items()
-                    if k in ("tree_id", "branch_id", "parent_response_id", "sequence")
-                },
             )
         except Exception as exc:
             logger.warning(
-                "Persistence via persist_chat_turn failed (continuing)",
-                extra={"error": str(exc)},
+                "Chat turn persistence failed (continuing)", extra={"error": str(exc)}
             )
 
     logger.info("Turn-based Ollama chat completed", extra={"model": model})

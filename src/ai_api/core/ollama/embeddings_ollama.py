@@ -5,6 +5,19 @@ This module implements ``create_embeddings`` (called by ``EmbedOllamaClient.crea
 It generates vector embeddings using Ollama's ``/api/embeddings`` (or ``/api/embed``)
 endpoint and persists via the unified ``persist_chat_turn`` path with ``kind="embedding"``.
 
+save_mode support
+-----------------
+Every public coroutine now honours ``save_mode`` uniformly:
+
+- ``SaveMode.NONE`` → generated text is echoed to ``sys.stdout`` (new behaviour)
+  and the response object is returned.  No persistence occurs.
+- ``SaveMode.JSON_FILES`` / ``POSTGRES`` → normal persistence path.
+
+The helper ``output_llm_response_to_stdout`` is used when no
+``PersistenceManager`` is attached, guaranteeing that ``save_mode=none``
+**always** produces visible output regardless of how the client was
+instantiated.
+
 GPU Memory Check
 ----------------
 The embedding POST is wrapped with the same ``is_ollama_gpu_memory_error`` +
@@ -25,6 +38,7 @@ from typing import Any, Union
 
 import httpx
 
+from ...data_structures.base_objects import SaveMode
 from ...data_structures.ollama_objects import OllamaRequest
 from .errors_ollama import (
     is_ollama_gpu_memory_error,
@@ -130,18 +144,25 @@ async def create_embeddings(
     )
 
     # Persist (non-chat, no branching)
-    if save_mode != "none" and client.persistence_manager is not None:
-        try:
-            req = OllamaRequest(model=model, input=input, save_mode=save_mode, **kwargs)
+    if save_mode in (SaveMode.NONE, "none"):
+        if client.persistence_manager is not None:
             await client.persistence_manager.persist_chat_turn(
                 provider_response=response,
-                provider_request=req,
-                kind="embedding",
-                branching=False,
+                provider_request=request,
+                kind="chat",
+                branching=True,
             )
+        else:
+            # No pm → direct STDOUT (re-uses shared helper)
+            from ..common.persistence import output_llm_response_to_stdout
+
+            output_llm_response_to_stdout(response, getattr(client, "logger", None))
+    elif client.persistence_manager is not None:
+        try:
+            await client.persistence_manager.persist_chat_turn(...)
         except Exception as exc:
             logger.warning(
-                "Embedding persistence failed (continuing)", extra={"error": str(exc)}
+                "Chat turn persistence failed (continuing)", extra={"error": str(exc)}
             )
 
     logger.info("Ollama embeddings completed", extra={"model": model})
