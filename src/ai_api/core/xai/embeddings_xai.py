@@ -10,13 +10,13 @@ The implementation uses xAI's OpenAI-compatible ``/v1/embeddings`` endpoint
 (``text-embedding-3-large`` and similar models). It supports both single-string
 and batch (list-of-strings) input, returns a rich ``XAIEmbedResponse`` object,
 and optionally persists the call via the unified ``persist_chat_turn`` entry
-point with ``kind="embedding"`` and ``branching=False`` (embeddings are never
+point with ``kind=\"embedding\"`` and ``branching=False`` (embeddings are never
 part of a Git-style conversation tree).
 
 Error Handling (High Standard)
 ------------------------------
-All network / API failures are wrapped using ``wrap_xai_api_error`` (from
-``errors_xai.py``) which produces a properly typed ``xAIAPIError`` with
+All network / API failures are wrapped using ``wrap_error`` (from
+``common/errors.py``) which produces a properly typed ``XAIError`` with
 ``__cause__`` and ``details``. HTTP status errors are specially caught and
 enriched with status code. Persistence errors are logged at WARNING level
 but never abort the embedding call (graceful degradation). This matches the
@@ -39,7 +39,7 @@ See Also
 ai_api.core.xai.xai_client.EmbedXAIClient
 ai_api.core.ollama.embeddings_ollama
 ai_api.core.common.persistence.PersistenceManager.persist_chat_turn
-ai_api.core.xai.errors_xai (wrap_xai_api_error, xAIAPIError)
+ai_api.core.xai.errors_xai (XAIError)
 """
 
 from __future__ import annotations
@@ -49,8 +49,10 @@ from typing import Any, Union
 
 import httpx
 
+from ...data_structures.base_objects import SaveMode
 from ...data_structures.xai_objects import xAIRequest
-from .errors_xai import wrap_xai_api_error
+from ..common.errors import PersistenceError, wrap_error
+from .errors_xai import XAIError
 
 
 class XAIEmbedResponse:
@@ -78,15 +80,15 @@ class XAIEmbedResponse:
     -------
     to_neutral_format(branch_info=None)
         Returns a dict in the neutral turn format expected by
-        ``PersistenceManager.persist_chat_turn`` (role="embedding").
+        ``PersistenceManager.persist_chat_turn`` (role=\"embedding\").
 
     Examples
     --------
     >>> resp = XAIEmbedResponse(
-    ...     model="text-embedding-3-large",
+    ...     model=\"text-embedding-3-large\",
     ...     embeddings=[[0.1, 0.2, ...], [0.3, 0.4, ...]],
-    ...     usage={"prompt_tokens": 10, "total_tokens": 10},
-    ...     raw={"object": "list", "data": [...]},
+    ...     usage={\"prompt_tokens\": 10, \"total_tokens\": 10},
+    ...     raw={\"object\": \"list\", \"data\": [...]},
     ... )
     >>> len(resp.embeddings)
     2
@@ -110,7 +112,7 @@ class XAIEmbedResponse:
         """Convert embedding result to the neutral format used by persistence.
 
         The neutral turn stores embeddings under ``content`` (as JSON-serialisable
-        list(s) of floats) with ``role="embedding"``. This allows the same
+        list(s) of floats) with ``role=\"embedding\"``. This allows the same
         ``responses`` table and Git-branching infrastructure to hold both chat
         turns and embedding calls without any schema modification.
 
@@ -140,7 +142,7 @@ async def create_embeddings(
     input: Union[str, list[str]],
     model: str = "text-embedding-3-large",
     *,
-    save_mode: str = "none",
+    save_mode: SaveMode = SaveMode.NONE,
     **kwargs: Any,
 ) -> XAIEmbedResponse:
     """Generate one or more text embeddings using the xAI embeddings endpoint.
@@ -156,8 +158,8 @@ async def create_embeddings(
 
     Persistence
     -----------
-    When ``save_mode != "none"`` the embedding call is recorded via the
-    unified ``persist_chat_turn`` helper with ``kind="embedding"`` and
+    When ``save_mode is not SaveMode.NONE`` the embedding call is recorded via the
+    unified ``persist_chat_turn`` helper with ``kind=\"embedding\"`` and
     ``branching=False``. This keeps the conversation tree clean (embeddings
     never participate in Git-style rebase/edit_history workflows).
 
@@ -173,12 +175,12 @@ async def create_embeddings(
     model : str, default "text-embedding-3-large"
         xAI embedding model identifier. Must be a model that supports the
         embeddings endpoint (currently OpenAI-compatible names are accepted).
-    save_mode : {"none", "json_files", "postgres"}, default "none"
-        Persistence backend. When not ``"none"`` the interaction is written
-        to the chosen store using ``kind="embedding"``.
+    save_mode : SaveMode, default SaveMode.NONE
+        Persistence backend. When not ``SaveMode.NONE`` the interaction is written
+        to the chosen store using ``kind=\"embedding\"``.
     **kwargs : Any
         Additional fields passed directly into the embeddings request payload
-        (e.g. ``dimensions=1024``, ``encoding_format="float"``) and also
+        (e.g. ``dimensions=1024``, ``encoding_format=\"float\"``) and also
         forwarded to ``xAIRequest`` for persistence.
 
     Returns
@@ -189,9 +191,9 @@ async def create_embeddings(
 
     Raises
     ------
-    xAIAPIError
+    XAIError
         Any failure at the HTTP / API level is wrapped by
-        ``wrap_xai_api_error`` (from ``errors_xai.py``). This includes
+        ``wrap_error`` (from ``common/errors.py``). This includes
         network errors, authentication failures, rate limits, and non-2xx
         HTTP responses. The original exception is attached as ``__cause__``.
     httpx.HTTPStatusError
@@ -206,9 +208,9 @@ async def create_embeddings(
     Single embedding (no persistence)
     >>> emb = await create_embeddings(
     ...     client,
-    ...     input="The quick brown fox jumps over the lazy dog.",
-    ...     model="text-embedding-3-large",
-    ...     save_mode="none",
+    ...     input=\"The quick brown fox jumps over the lazy dog.\",
+    ...     model=\"text-embedding-3-large\",
+    ...     save_mode=SaveMode.NONE,
     ... )
     >>> len(emb.embeddings)
     3072
@@ -218,9 +220,9 @@ async def create_embeddings(
     Batch embeddings with Postgres persistence
     >>> embs = await create_embeddings(
     ...     client,
-    ...     input=["doc1 text", "doc2 text", "doc3 text"],
-    ...     model="text-embedding-3-large",
-    ...     save_mode="postgres",
+    ...     input=[\"doc1 text\", \"doc2 text\", \"doc3 text\"],
+    ...     model=\"text-embedding-3-large\",
+    ...     save_mode=SaveMode.POSTGRES,
     ...     dimensions=1024,
     ... )
     >>> len(embs.embeddings)
@@ -241,7 +243,7 @@ async def create_embeddings(
     See Also
     --------
     XAIEmbedResponse.to_neutral_format
-    ai_api.core.xai.errors_xai.wrap_xai_api_error
+    ai_api.core.xai.errors_xai (XAIError)
     ai_api.core.common.persistence.PersistenceManager.persist_chat_turn
     """
 
@@ -271,15 +273,17 @@ async def create_embeddings(
             "xAI embeddings endpoint returned non-2xx status",
             extra={"status_code": status, "url": str(exc.request.url)},
         )
-        raise wrap_xai_api_error(
-            exc, f"xAI embeddings failed with HTTP {status}"
+        raise wrap_error(
+            XAIError,
+            f"xAI embeddings failed with HTTP {status}",
+            exc,
         ) from exc
     except Exception as exc:
         logger.error(
             "xAI embeddings request failed",
             extra={"error_type": type(exc).__name__, "error": str(exc)},
         )
-        raise wrap_xai_api_error(exc, "xAI embeddings request failed") from exc
+        raise wrap_error(XAIError, "xAI embeddings request failed", exc) from exc
 
     # ------------------------------------------------------------------
     # Normalise response into XAIEmbedResponse
@@ -302,7 +306,7 @@ async def create_embeddings(
     # ------------------------------------------------------------------
     # Optional persistence (non-chat, no branching)
     # ------------------------------------------------------------------
-    if save_mode != "none" and getattr(client, "persistence_manager", None) is not None:
+    if save_mode is not SaveMode.NONE and getattr(client, "persistence_manager", None) is not None:
         try:
             # Construct a proper xAIRequest so we stay inside the protocol
             embed_request = xAIRequest(
@@ -318,8 +322,14 @@ async def create_embeddings(
                 branching=False,
             )
         except Exception as exc:
-            logger.warning(
+            wrapped = wrap_error(
+                PersistenceError,
                 "Embedding persistence failed (continuing gracefully)",
+                exc,
+                level=logging.WARNING,
+            )
+            logger.warning(
+                wrapped.message,
                 extra={"error": str(exc)},
             )
 
