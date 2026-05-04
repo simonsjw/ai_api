@@ -38,7 +38,7 @@ from ai_api.data_structures.base_objects import (
     NeutralTurn,
 )
 
-from .errors import wrap_error, PersistenceError
+from .errors import PersistenceError, wrap_error
 from .persistence_methods.database import PostgresPersistenceBackend
 from .persistence_methods.json import JsonFilePersistenceBackend
 from .persistence_methods.stdout import StdoutPersistenceBackend
@@ -68,6 +68,15 @@ class PersistenceBackend(Protocol):
 
     Concrete implementations live in the sibling modules listed below.
     """
+
+    async def reconstruct_neutral_branch(
+        self,
+        tree_id: uuid.UUID,
+        branch_id: uuid.UUID,
+        start_from_response_id: uuid.UUID | None = None,
+        up_to_response_id: uuid.UUID | None = None,
+        max_depth: int | None = None,
+    ) -> list[dict]: ...
 
     async def persist(
         self,
@@ -102,6 +111,20 @@ class PersistenceBackend(Protocol):
             ``{"tree_id": uuid|None, "branch_id": uuid|None, "sequence": int|None,
             "parent_response_id": uuid|None, "kind": str}``
         """
+        ...
+
+    async def create_edited_branch(
+        self,
+        tree_id: uuid.UUID,
+        source_branch_id: uuid.UUID,
+        edit_ops: list[dict[str, Any]],
+        *,
+        new_branch_name: str | None = None,
+        start_from_response_id: uuid.UUID | None = None,
+        end_at_response_id: uuid.UUID | None = None,
+        max_depth: int | None = None,
+    ) -> dict[str, Any]:
+        """Create a new edited branch by applying edit operations to existing history."""
         ...
 
 
@@ -152,7 +175,9 @@ class PersistenceManager:
 
     def __init__(
         self,
-        backend: PersistenceBackend,
+        backend: PersistenceBackend
+        | JsonFilePersistenceBackend
+        | StdoutPersistenceBackend,
         logger: logging.Logger | None = None,
         media_root: Any | None = None,
     ) -> None:
