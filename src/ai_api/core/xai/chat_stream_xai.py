@@ -3,7 +3,7 @@ xAI Streaming Chat Implementation (SDK-based) with Symmetrical Persistence
 
 This module implements real-time token streaming for xAI using the official
 SDK async iterator. It is the backend for ``StreamXAIClient.create_chat``
-and is called from ``ChatSession`` when ``mode="stream"``.
+and is called from ``ChatSession`` when ``mode=\"stream\"``.
 
 Design
 ------
@@ -26,13 +26,13 @@ are updated correctly.
 Error Handling
 --------------
 - SDK / transport errors (gRPC, httpx, authentication, rate limits, timeouts)
-  during streaming are wrapped as ``xAIAPIError`` (via ``wrap_xai_api_error``).
+  during streaming are wrapped as ``XAIError`` (via ``wrap_error``).
 - Structured-output parsing failures on the final chunk are wrapped as
-  ``xAIClientError`` (logged at WARNING, stream continues).
+  ``XAIClientError`` (logged at WARNING, stream continues).
 - Final persistence failures are non-fatal (logged at WARNING with rich
-  context via ``wrap_persistence_error``) so the user still receives tokens.
-- All raised exceptions inherit from ``AIAPIError`` (directly or indirectly),
-  enabling uniform ``except AIAPIError`` handling at higher layers.
+  context via ``wrap_error``) so the user still receives tokens.
+- All raised exceptions inherit from ``APIError`` (directly or indirectly),
+  enabling uniform ``except APIError`` handling at higher layers.
 
 See Also
 --------
@@ -50,10 +50,11 @@ from typing import Any, AsyncIterator, Type
 
 from pydantic import BaseModel
 
+from ...data_structures.base_objects import SaveMode
 from ...data_structures.xai_objects import xAIRequest, xAIResponse
-from ..common.errors import wrap_client_error, wrap_persistence_error
+from ..common.errors import PersistenceError, wrap_error
 from ..common.response_struct import create_json_response_spec
-from .errors_xai import wrap_xai_api_error
+from .errors_xai import XAIClientError, XAIError
 
 __all__: list[str] = ["generate_stream_and_persist"]
 
@@ -63,7 +64,7 @@ async def generate_stream_and_persist(
     persistence_manager: Any,
     chat: Any,
     request: xAIRequest,
-    save_mode: str = "none",
+    save_mode: SaveMode = SaveMode.NONE,
     response_model: Type[BaseModel] | None = None,
     **kwargs: Any,
 ) -> AsyncIterator[Any]:
@@ -81,7 +82,7 @@ async def generate_stream_and_persist(
         Async iterator returned by the xAI SDK (``sdk_client.chat.create(...)``).
     request : xAIRequest
         Original request (contains model, messages, branching metadata).
-    save_mode : {"none", "json_files", "postgres"}, default "none"
+    save_mode : SaveMode, default SaveMode.NONE
         Persistence backend.
     response_model : type[BaseModel] or None, optional
         Pydantic model for structured output on the final response.
@@ -98,9 +99,9 @@ async def generate_stream_and_persist(
 
     Raises
     ------
-    xAIAPIError
+    XAIError
         Any SDK / transport error during streaming (wrapped with full context).
-    xAIClientError
+    XAIClientError
         Structured-output parsing failure on the final chunk (non-fatal).
 
     Notes
@@ -118,8 +119,10 @@ async def generate_stream_and_persist(
                 update={"response_format": spec.to_sdk_response_format()}
             )
         except Exception as exc:
-            raise wrap_client_error(
-                exc, "Failed to build structured-output specification for xAI stream"
+            raise wrap_error(
+                XAIClientError,
+                "Failed to build structured-output specification for xAI stream",
+                exc,
             ) from exc
 
     full_text: list[str] = []
@@ -144,8 +147,10 @@ async def generate_stream_and_persist(
                 )
                 break
     except Exception as exc:
-        raise wrap_xai_api_error(
-            exc, f"xAI streaming request failed for model '{request.model}'"
+        raise wrap_error(
+            XAIError,
+            f"xAI streaming request failed for model '{request.model}'",
+            exc,
         ) from exc
 
     # 3. Validate structured output on the final response (non-fatal).
@@ -154,8 +159,11 @@ async def generate_stream_and_persist(
             parsed = response_model.model_validate_json("".join(full_text))
             final_response.parsed = parsed
         except Exception as exc:
-            wrapped = wrap_client_error(
-                exc, "Failed to parse final structured chunk from xAI stream"
+            wrapped = wrap_error(
+                XAIClientError,
+                "Failed to parse final structured chunk from xAI stream",
+                exc,
+                level=logging.WARNING,
             )
             logger.warning(
                 "Structured-output parsing failed (continuing)",
@@ -164,7 +172,7 @@ async def generate_stream_and_persist(
 
     # 4. Persist final response with branching context (non-fatal on failure).
     if (
-        save_mode != "none"
+        save_mode is not SaveMode.NONE
         and persistence_manager is not None
         and final_response is not None
     ):
@@ -186,8 +194,11 @@ async def generate_stream_and_persist(
                 },
             )
         except Exception as exc:
-            wrapped = wrap_persistence_error(
-                exc, "Final streaming persistence failed for xAI (continuing)"
+            wrapped = wrap_error(
+                PersistenceError,
+                "Final streaming persistence failed for xAI (continuing)",
+                exc,
+                level=logging.WARNING,
             )
             logger.warning(
                 wrapped.message,
